@@ -62,84 +62,103 @@ def chat():
 
     is_postgres = settings.saarthi_persistence == "postgres"
 
-    if is_postgres:
-        svc = ConversationService(g.db_session)
-        
-        # 1. Resolve conversation
-        req_conv_id = uuid.UUID(conversation_id_str) if conversation_id_str else None
-        conv = svc.resolve(req_conv_id, g.user)
-        
-        # 2. Persist user message (does not lock row across network anymore, just reserves seq)
-        # Note: the prompt says teardown_request commits on success.
-        # But allocate_and_persist_user_message needs to release the lock before network call?
-        # Actually, "Route handlers must NEVER call commit() — that is the point, so nobody can forget one."
-        # If the lock is held across the network call, that's what we have to do because we can't call commit().
-        # Wait, the prompt for §10.1 specifically says "teardown_request commits on success... Route handlers must NEVER call commit()".
-        # This implies we DON'T release the row lock before the network call in this route!
-        svc.allocate_and_persist_user_message(conv.id, user_message)
-        
-        # 3. Fetch history
-        memory_spec = MemorySpec(max_messages=10)
-        history = svc.history(conv.id, memory_spec)
-    else:
-        # Memory mode
-        history = global_state.chat_history
-
-    # Pass the message to our Orchestrator or a specific agent.
-    #
-    # SAARTHI_REGISTRY=code: unchanged -- specialized.py/orchestrator.py serve
-    # every request, exactly as before this module.
-    # SAARTHI_REGISTRY=config: AgentRegistry + HandlerFactory/LlmAgentHandler
-    # serve every request instead; the implicit "Saarthi" routing decision is
-    # replaced by config_mode_router.decide_sub_agent, which reproduces the
-    # SAME LLM-classification approach orchestrator.py uses, just retargeted
-    # at registry entries -- only the execution backend differs.
     try:
-        conv_id = conv.id if is_postgres else None
-
-        if target_agent and target_agent != "Saarthi":
-            if settings.saarthi_registry == "code":
-                if target_agent in orchestrator.agents:
-                    agent = orchestrator.agents[target_agent]
-                    response = agent.process(user_message, history)
-                    result = {"agent_name": agent.name, "response": response}
-                else:
-                    return jsonify({"error": "Agent not found"}), 404
-            else:
-                container = current_app.config["CONTAINER"]
-                reg = container.agent_registry.get(target_agent)
-                if reg is None:
-                    return jsonify({"error": "Agent not found"}), 404
-                result = _execute_llm_agent(container, reg, user_message, history, conv_id)
-        else:
-            if settings.saarthi_registry == "code":
-                result = orchestrator.handle_request(user_message, history)
-            else:
-                container = current_app.config["CONTAINER"]
-                from src.services.config_mode_router import decide_sub_agent
-                reg = decide_sub_agent(
-                    container.llm_factory,
-                    container.agent_registry.routable(),
-                    container.agent_registry.default(),
-                    user_message,
-                )
-                result = _execute_llm_agent(container, reg, user_message, history, conv_id)
-
         if is_postgres:
-            # 4. Persist assistant response
-            svc.persist_assistant_message(conv.id, result["response"], result["agent_name"])
-            
-            return jsonify({
-                "agent_name": result["agent_name"],
-                "response": result["response"],
-                "status": "success",
-                "flow": svc.flow_payload(conv.id),
-                "conversation_id": str(conv.id),
-                "agent_key": target_agent,
-                "agent_type": "remote_flow", # Dummy for POC
-            })
+            if settings.saarthi_registry == "code":
+                svc = ConversationService(g.db_session)
+                req_conv_id = uuid.UUID(conversation_id_str) if conversation_id_str else None
+                conv = svc.resolve(req_conv_id, g.user)
+                svc.allocate_and_persist_user_message(conv.id, user_message)
+                memory_spec = MemorySpec(max_messages=10)
+                history = svc.history(conv.id, memory_spec)
+                
+                if target_agent and target_agent != "Saarthi":
+                    if target_agent in orchestrator.agents:
+                        agent = orchestrator.agents[target_agent]
+                        response = agent.process(user_message, history)
+                        result = {"agent_name": agent.name, "response": response}
+                    else:
+                        return jsonify({"error": "Agent not found"}), 404
+                else:
+                    result = orchestrator.handle_request(user_message, history)
+                    
+                svc.persist_assistant_message(conv.id, result["response"], result["agent_name"])
+                return jsonify({
+                    "agent_name": result["agent_name"],
+                    "response": result["response"],
+                    "status": "success",
+                    "flow": svc.flow_payload(conv.id),
+                    "conversation_id": str(conv.id),
+                    "agent_key": target_agent,
+                    "agent_type": "remote_flow", # Dummy for POC
+                })
+            else:
+                # New OrchestrationService path
+                from src.services.orchestration import OrchestrationService, TurnInput
+                container = current_app.config["CONTAINER"]
+                orch = OrchestrationService(
+                    session=g.db_session,
+                    registry=container.agent_registry,
+                    handler_factory=container.handler_factory,
+                    llm_factory=container.llm_factory
+                )
+                
+                req_conv_id = uuid.UUID(conversation_id_str) if conversation_id_str else None
+                ctx_in = TurnInput(
+                    request_id=g.request_id if hasattr(g, "request_id") else str(uuid.uuid4()),
+                    conversation_id=req_conv_id,
+                    user=g.user,
+                    text=user_message,
+                    option_id=option_id,
+                    agent_key=target_agent if target_agent and target_agent != "Saarthi" else None
+                )
+                
+                res = orch.handle_turn(ctx_in)
+                svc = ConversationService(g.db_session)
+                
+                return jsonify({
+                    "agent_name": res.agent.name,
+                    "response": res.turn.text,
+                    "status": "success",
+                    "flow": svc.flow_payload(res.conversation.id),
+                    "conversation_id": str(res.conversation.id),
+                    "agent_key": res.agent.key,
+                    "agent_type": res.agent.spec.agent_type,
+                })
         else:
+            # Memory mode
+            history = global_state.chat_history
+            conv_id = None
+            if target_agent and target_agent != "Saarthi":
+                if settings.saarthi_registry == "code":
+                    if target_agent in orchestrator.agents:
+                        agent = orchestrator.agents[target_agent]
+                        response = agent.process(user_message, history)
+                        result = {"agent_name": agent.name, "response": response}
+                    else:
+                        return jsonify({"error": "Agent not found"}), 404
+                else:
+                    container = current_app.config["CONTAINER"]
+                    reg = container.agent_registry.get(target_agent)
+                    if reg is None:
+                        return jsonify({"error": "Agent not found"}), 404
+                    result = _execute_llm_agent(container, reg, user_message, history, conv_id)
+            else:
+                if settings.saarthi_registry == "code":
+                    result = orchestrator.handle_request(user_message, history)
+                else:
+                    container = current_app.config["CONTAINER"]
+                    from src.services.config_mode_router import decide_sub_agent
+                    reg = decide_sub_agent(
+                        container.llm_factory,
+                        container.agent_registry.routable(),
+                        container.agent_registry.default(),
+                        user_message,
+                    )
+                    result = _execute_llm_agent(container, reg, user_message, history, conv_id)
+
             global_state.chat_history.append({"role": "user", "content": user_message})
+            # Only append assistant if not error? 
             global_state.chat_history.append({"role": "assistant", "content": result["response"]})
             global_state._record_flow_stop(result["agent_name"], user_message)
 
