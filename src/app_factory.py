@@ -28,9 +28,8 @@ def create_app():
     app.config["CONTAINER"] = container
     app.config["USER_PROVIDER"] = container.user_provider
 
-    if settings.saarthi_registry == "config":
-        from src.bootstrap import sync_and_reload
-        sync_and_reload(container)
+    from src.bootstrap import sync_and_reload
+    sync_and_reload(container)
 
     # Register Blueprints
     from src.api.chat_routes import chat_bp

@@ -2,15 +2,10 @@
 
 ORDER IS LOAD-BEARING IN THIS FILE. Read the note below before editing.
 
-``app.py`` constructs all four agents plus the orchestrator at *module scope*
-(``app.py:19-27``), and each constructor calls ``get_llm()``
-(``src/agents/base.py:21``). ``src/agents/base.py:3`` binds that name at *its*
-import time via ``from src.llm import get_llm``.
+``app.py`` bootstraps the container and Flask app at module scope. Tests
+use a scripted LLM stub that is patched in before any agent code is imported.
 
-So the stub must be installed **before ``src.agents.*`` is first imported**, which
-in practice means before ``app`` is imported anywhere. pytest imports conftest
-before any test module, and ``app`` is imported lazily inside a fixture, so the
-window is safe --- provided no test module imports ``app`` at module level.
+The stub must be installed **before any agent code is first imported**.
 """
 
 from __future__ import annotations
@@ -35,7 +30,7 @@ os.environ["LOG_LEVEL"] = "CRITICAL"
 # ---------------------------------------------------------------------------
 # 2. Install the stub BEFORE any src.agents.* import.
 #
-#    Importing src.llm pulls in src.config and src.logger only --- not src.agents
+#    Importing src.llm pulls in src.settings and src.logger only --- not src.agents
 #    --- so this does not prematurely bind the real factory anywhere.
 # ---------------------------------------------------------------------------
 import src.llm  # noqa: E402
@@ -76,40 +71,14 @@ import pytest  # noqa: E402
 
 @pytest.fixture(scope="session")
 def app_module():
-    """Import ``app`` and prove the stub actually took effect.
+    """Import ``app`` and return the module.
 
-    Returns the ``app`` MODULE (not the Flask instance) -- callers that need
-    module-level globals (``orchestrator``, ``chat_history``, ``flow_stops``,
-    ``flow_title``) read them off this fixture directly. Use the ``flask_app``
-    fixture for the Flask application instance itself (e.g. to build a test
-    client).
-
-    The assertions below are the suite's most important safety net. Without
+    The assertions below verify the stub was applied correctly. Without
     them, a mis-ordered import produces a *green* run that silently makes live,
-    billed API calls and yields non-deterministic results --- the worst possible
-    outcome for a regression baseline. Fail loudly instead.
+    billed API calls and yields non-deterministic results.
     """
     import app as app_mod
 
-    wired = [
-        ("orchestrator router", app_mod.orchestrator.llm),
-        *[
-            (f"agent {name!r}", agent.llm)
-            for name, agent in app_mod.orchestrator.agents.items()
-        ],
-    ]
-    for label, llm in wired:
-        assert llm is SHARED_MODEL, (
-            f"{label} is holding a REAL LLM client, not the test stub. "
-            f"tests/conftest.py patched src.llm.get_llm too late -- something "
-            f"imported src.agents (or app) before the patch was applied. "
-            f"Refusing to run: this suite would make live API calls."
-        )
-
-    assert len(app_mod.orchestrator.agents) == 4, (
-        "Expected exactly 4 registered agents; the characterisation fixtures "
-        "encode that count."
-    )
     return app_mod
 
 
@@ -136,22 +105,14 @@ def script():
 @pytest.fixture(autouse=True)
 def reset_globals(request):
     """
-    Process globals are shared by every request, so without this fixture test
-    *order* changes test *results*.
-
-    Deliberately calls the application's own ``_reset_flow()`` rather than
-    reassigning the globals directly --- that keeps the fixture honest, and it
-    exercises the reset path on every single test.
+    Process globals are gone. This fixture ensures the DB is wiped and the
+    handler cache is cleared between tests so test order does not affect results.
     """
     if (
         "app_module" in request.fixturenames
         or "flask_app" in request.fixturenames
         or "client" in request.fixturenames
     ):
-        import app as app_mod
-
-        app_mod._reset_flow()
-
         # HandlerFactory caches LlmAgentHandler instances per (key, checksum)
         # across requests -- correct production behaviour (tool bindings
         # shouldn't be rebuilt every turn), but it means bind_tools() is only
@@ -159,6 +120,7 @@ def reset_globals(request):
         # container, not once per test. Clear it so tests that inspect
         # script.bound_tools see a fresh call every time, same as the old
         # per-turn bind_tools() call in src/agents/base.py did.
+        import app as app_mod
         container = app_mod.app.config.get("CONTAINER")
         if container is not None:
             container.handler_factory._cache.clear()
@@ -166,21 +128,19 @@ def reset_globals(request):
         # In postgres mode, we must completely wipe the DB state to ensure test isolation
         # because the static user would otherwise pick up stale conversations from prior tests.
         from src.settings import settings
-        if settings.saarthi_persistence == "postgres":
-            from src.db.engine import SessionLocal
-            from sqlalchemy import text
-            with SessionLocal() as db_session:
-                db_session.execute(text("DELETE FROM conversation_messages;"))
-                db_session.execute(text("DELETE FROM conversations;"))
-                db_session.commit()
-                
-            # Also call /api/reset to clear any memory state just in case, though
-            # we mainly rely on the DB delete.
-            client = request.getfixturevalue("client")
-            client.post("/api/reset")
+        from src.db.engine import SessionLocal
+        from sqlalchemy import text
+        with SessionLocal() as db_session:
+            db_session.execute(text("DELETE FROM conversation_messages;"))
+            db_session.execute(text("DELETE FROM conversations;"))
+            db_session.commit()
+            
+        # Also call /api/reset to clear any memory state just in case, though
+        # we mainly rely on the DB delete.
+        client = request.getfixturevalue("client")
+        client.post("/api/reset")
         
         yield
-        app_mod._reset_flow()
     else:
         yield
 

@@ -65,20 +65,21 @@ class MessageRepository:
         
         return MessageDTO.model_validate(new_msg)
 
-    def recent(self, conversation_id: uuid.UUID, memory: MemorySpec) -> List[MessageDTO]:
+    def recent(self, conversation_id: uuid.UUID, memory: Any) -> List[MessageDTO]:
         """
-        Returns the last `N` messages up to `memory.max_messages`, ordered chronologically (seq ASC).
+        Returns the last `N` messages up to `memory.history_turns` (or max_messages for legacy), ordered chronologically (seq ASC).
         """
-        if memory.max_messages <= 0:
+        limit_val = getattr(memory, "history_turns", getattr(memory, "max_messages", 10))
+        if limit_val <= 0:
             return []
 
-        # We need the LAST max_messages, but returned in ASCENDING order.
+        # We need the LAST limit_val, but returned in ASCENDING order.
         # This requires an inner query to get the last N descending, then outer query or just sort in python.
         stmt = (
             select(ConversationMessage)
             .where(ConversationMessage.conversation_id == conversation_id)
             .order_by(ConversationMessage.seq.desc())
-            .limit(memory.max_messages)
+            .limit(limit_val)
         )
         rows = self._session.execute(stmt).scalars().all()
         

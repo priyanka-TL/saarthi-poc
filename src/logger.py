@@ -1,6 +1,6 @@
 import logging
 import json
-from src.config import config
+from src.settings import settings as config
 
 class RequestIDFilter(logging.Filter):
     """Injects g.request_id into the log record if available."""

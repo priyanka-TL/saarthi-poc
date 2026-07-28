@@ -1,4 +1,4 @@
-from src.config import config
+from src.settings import settings as config
 from src.logger import get_logger
 from src.domain.agent_spec import ModelSpec
 from .normalization import _NormalizedChatLiteLLM

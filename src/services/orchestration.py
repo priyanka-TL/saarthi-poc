@@ -8,7 +8,6 @@ from src.repositories.conversations import ConversationRepository
 from src.repositories.messages import MessageRepository
 from src.repositories.sessions import AgentSessionRepository
 from src.services.router_service import RouterService, RouteDecision
-from src.services.config_mode_router import decide_sub_agent
 from src.services.session_service import SessionService
 from src.services.agent_registry import AgentRegistry
 from src.agents.factory import HandlerFactory
@@ -80,40 +79,31 @@ class OrchestrationService:
             selected_option_id=ctx_in.option_id, request_id=ctx_in.request_id
         )
 
-        # 4. route
-        router_mode = os.environ.get("SAARTHI_ROUTER", "v2")
-        if router_mode == "v1":
-            visible = [a for a in self._registry.routable() if a.spec.access.matches(ctx_in.user)]
-            # We mock the TurnContext here just for routing if it were to use it, 
-            # but config_mode_router uses strings
-            agent = decide_sub_agent(self._llm_factory, visible, self._registry.default(), ctx_in.text)
-            decision = RouteDecision(agent, reason="llm", confidence=1.0, router_latency_ms=0)
-        else:
-            # v2 routing (5 gates)
-            # Build partial context for router
-            ctx_partial = TurnContext(
-                request_id=ctx_in.request_id,
-                conversation_id=conv.id,
-                user=ctx_in.user,
-                text=ctx_in.text,
-                option_id=ctx_in.option_id,
-                history=[], # router might use recent history
-                session=None,
-                locale=ctx_in.user.locale if hasattr(ctx_in.user, 'locale') else "en"
-            )
-            # Populate history for router so it can be history-aware (gate 4)
-            ctx_partial = TurnContext(
-                request_id=ctx_in.request_id,
-                conversation_id=conv.id,
-                user=ctx_in.user,
-                text=ctx_in.text,
-                option_id=ctx_in.option_id,
-                history=self._messages.recent(conv.id, self._registry.default().spec.memory) if self._registry.default() else [],
-                session=None,
-                locale=ctx_partial.locale
-            )
-            decision = self._router.select(conv, ctx_partial, explicit_key=ctx_in.agent_key)
-            agent = decision.agent
+        # 4. route (v2: 5 gates)
+        # Build partial context for router
+        ctx_partial = TurnContext(
+            request_id=ctx_in.request_id,
+            conversation_id=conv.id,
+            user=ctx_in.user,
+            text=ctx_in.text,
+            option_id=ctx_in.option_id,
+            history=[], # router might use recent history
+            session=None,
+            locale=ctx_in.user.locale if hasattr(ctx_in.user, 'locale') else "en"
+        )
+        # Populate history for router so it can be history-aware (gate 4)
+        ctx_partial = TurnContext(
+            request_id=ctx_in.request_id,
+            conversation_id=conv.id,
+            user=ctx_in.user,
+            text=ctx_in.text,
+            option_id=ctx_in.option_id,
+            history=self._messages.recent(conv.id, self._registry.default().spec.memory) if self._registry.default() else [],
+            session=None,
+            locale=ctx_partial.locale
+        )
+        decision = self._router.select(conv, ctx_partial, explicit_key=ctx_in.agent_key)
+        agent = decision.agent
 
         # 5. enforce limits
         self._rate_limits.check(conv.id, ctx_in.user, agent.spec.limits)
@@ -179,8 +169,10 @@ class OrchestrationService:
         # 13. persist tool traces
         self._tools_repo.bulk_insert(msg.id, agent.id, turn.tool_traces)
         
-        # 14. touch conversation
-        self._conversations.touch(conv.id, title_from=ctx_in.text)
+        # 14. touch conversation (set title from first user message, truncated per contract)
+        raw_title = ctx_in.text
+        title_for_conv = raw_title if len(raw_title) <= 60 else raw_title[:57] + "..."
+        self._conversations.touch(conv.id, title_from=title_for_conv)
         self._db.commit()
         
         return TurnResult(

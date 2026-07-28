@@ -23,10 +23,7 @@ class Settings(BaseSettings):
     config_sync_mode: str = "safe"
 
     # ---- feature flags ----
-    saarthi_persistence: str = "memory"
     saarthi_user_provider: str = "static_token"
-    saarthi_registry: str = "config"
-    saarthi_router: str = "v1"
     mitra_enabled: int = 0
     saarthi_admin_enabled: int = 0
 

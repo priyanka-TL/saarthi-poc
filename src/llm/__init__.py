@@ -5,7 +5,7 @@ from langchain_core.messages import BaseMessage
 from langchain_core.outputs import ChatResult
 from langchain_litellm import ChatLiteLLM
 
-from src.config import config
+from src.settings import settings as config
 from src.logger import get_logger
 
 logger = get_logger("llm_client")

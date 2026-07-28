@@ -12,8 +12,6 @@ AGENTS_YAML_DIR = Path(__file__).parent / "config" / "agents"
 def sync_and_reload(container) -> None:
     """Runs config sync, then an initial registry load.
 
-    Call ONLY when settings.saarthi_registry == "config".
-
     Deliberately has NO try/except around either step. ConfigSyncService.sync()
     raises a pydantic ValidationError (misspelled YAML key -- the schema sets
     extra="forbid") or an UnknownToolError (bad `tools:` entry) uncaught by

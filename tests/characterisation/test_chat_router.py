@@ -3,26 +3,37 @@
 Reached by `agent_name="Saarthi"` or by omitting `agent_name` entirely
 (app.py:79 -- both take the same branch).
 
-On this path the scripted queue is consumed in a fixed order:
-    response 1 -> the classification string
-    response 2 -> the selected agent's reply
-
-Module 4.3 replaces this router with five ordered gates. Several behaviours
-pinned here are preserved deliberately (the self-describing prompt, the
-never-fail fallback); one is changed deliberately (substring matching).
+Gate 4: The RouterService emits a JSON prompt asking for an agent_key.
+The scripted model must return a JSON-parseable string for routing to work.
 """
 
 from __future__ import annotations
+
+import json
 
 import pytest
 
 from tests.characterisation.conftest import AGENT_NAMES, DEFAULT_AGENT, chat
 
+# Map display names to their agent keys (as registered in the YAML fixtures).
+_NAME_TO_KEY = {
+    "Health & Wellness Agent": "health_wellness",
+    "Technical Support Agent": "technical_support",
+    "General Support Agent": "general_support",
+    "Research & Web Agent": "research",
+}
+
+
+def _classify_json(key: str, confidence: float = 0.9) -> str:
+    """Return a JSON classification string the RouterService will accept."""
+    return json.dumps({"agent_key": key, "confidence": confidence})
+
 
 @pytest.mark.parametrize("agent_name", AGENT_NAMES)
 def test_classification_selects_the_named_agent(client, script, agent_name):
-    script.queue(agent_name)  # classification
-    script.queue("agent reply")  # the agent itself
+    key = _NAME_TO_KEY[agent_name]
+    script.queue(_classify_json(key))  # classification
+    script.queue("agent reply")        # the agent itself
 
     status, body = chat(client, "route me", "Saarthi")
 
@@ -33,8 +44,8 @@ def test_classification_selects_the_named_agent(client, script, agent_name):
 
 
 def test_omitting_agent_name_takes_the_router_path(client, script):
-    """app.py:79 -- a falsy agent_name is treated exactly like "Saarthi"."""
-    script.queue(DEFAULT_AGENT)
+    """A falsy agent_name is treated exactly like 'Saarthi'."""
+    script.queue(_classify_json("general_support"))
     script.queue("reply")
 
     status, body = chat(client, "route me")  # no agent_name at all
@@ -45,13 +56,12 @@ def test_omitting_agent_name_takes_the_router_path(client, script):
 
 
 def test_router_prompt_is_built_from_the_live_registry(client, script):
-    """orchestrator.py:32-33 assembles the prompt from every agent's name AND
-    description, so registering an agent updates routing with no router edit.
+    """The prompt is assembled from every agent's name AND description,
+    so registering an agent updates routing with no router edit.
 
-    This is the single best idea in the current codebase. Module 4.3 preserves
-    it in concept, so pin it now.
+    This is the single best idea in the codebase. Module 4.3 preserves it.
     """
-    script.queue(DEFAULT_AGENT)
+    script.queue(_classify_json("general_support"))
     script.queue("reply")
 
     chat(client, "route me", "Saarthi")
@@ -64,45 +74,44 @@ def test_router_prompt_is_built_from_the_live_registry(client, script):
 
 
 def test_router_prompt_names_the_fallback_agent(client, script):
-    """orchestrator.py:35 appends an explicit 'if none match' instruction."""
-    script.queue(DEFAULT_AGENT)
+    """The prompt includes a fallback instruction using the default agent's key."""
+    script.queue(_classify_json("general_support"))
     script.queue("reply")
 
     chat(client, "route me", "Saarthi")
 
-    assert f"If none match, reply with '{DEFAULT_AGENT}'" in script.system_prompt(0)
+    # RouterService uses agent_key for the fallback instruction
+    assert "general_support" in script.system_prompt(0)
+    assert "If nothing fits" in script.system_prompt(0)
 
 
-def test_router_sees_only_the_current_message(client, script):
-    """DEFECT (pinned): the router is history-blind -- orchestrator.py:54 passes
-    only {"request": request}.
+def test_router_is_history_aware(client, script):
+    """Gate 4: the router receives prior conversation turns as context.
 
-    This is why a multi-turn flow cannot survive today: on turn 2 of an
-    interview the message is a bare answer like a name, which classifies as
-    general chatter and the flow is lost.
-
-    Module 4.3 fixes this with session pinning (gate 2) plus conversation
-    context in the classification prompt. When it does, this test SHOULD fail.
+    RouterService._router_messages() appends the last 6 history messages,
+    so on turn 2 the router sees turn 1's message too.
     """
-    script.queue(DEFAULT_AGENT)
+    script.queue(_classify_json("general_support"))
     script.queue("first reply")
     chat(client, "my first message", "Saarthi")
 
-    script.queue(DEFAULT_AGENT)
+    script.queue(_classify_json("general_support"))
     script.queue("second reply")
     chat(client, "Priya", "Saarthi")
 
     router_second_call = script.calls[2]
     human_messages = [m for m in router_second_call if m.type == "human"]
-    assert len(human_messages) == 1
-    assert human_messages[0].content == "Priya"
-    assert not any("my first message" in str(m.content) for m in router_second_call)
+    # Should see BOTH messages in context
+    contents = [m.content for m in human_messages]
+    assert "Priya" in contents
+    assert any("my first message" in c for c in contents), (
+        "router is now history-aware -- prior messages appear in context"
+    )
 
 
 def test_unmatched_classification_falls_back_to_the_default_agent(client, script):
-    """orchestrator.py:72-73 -- classification is never allowed to fail the
-    request. Three independent paths all land on the default agent."""
-    script.queue("Some Agent That Does Not Exist")
+    """Routing NEVER fails -- unrecognised key falls through to default."""
+    script.queue(_classify_json("no_such_key"))
     script.queue("fallback reply")
 
     status, body = chat(client, "route me", "Saarthi")
@@ -112,7 +121,7 @@ def test_unmatched_classification_falls_back_to_the_default_agent(client, script
 
 
 def test_empty_classification_falls_back_to_the_default_agent(client, script):
-    """orchestrator.py:66-67 -- the empty-output branch."""
+    """Empty or non-JSON output falls through to gate 5 (default)."""
     script.queue("")
     script.queue("fallback reply")
 
@@ -123,7 +132,7 @@ def test_empty_classification_falls_back_to_the_default_agent(client, script):
 
 
 def test_classification_exception_falls_back_to_the_default_agent(client, script):
-    """orchestrator.py:69-70 -- the exception branch."""
+    """An LLM exception during routing falls through to gate 5 (default)."""
     script.queue_error(RuntimeError("classification exploded"))
     script.queue("fallback reply")
 
@@ -133,18 +142,13 @@ def test_classification_exception_falls_back_to_the_default_agent(client, script
     assert body["agent_name"] == DEFAULT_AGENT
 
 
-def test_substring_match_resolves_a_full_sentence(client, script):
-    """DEFECT (pinned): orchestrator.py:62-65 uses `name.lower() in category.lower()`
-    over a dict, first insertion-order match winning.
+def test_exact_key_matching_resolves_correctly(client, script):
+    """RouterService uses get_by_key_exact() -- the JSON key must match exactly.
 
-    A model that answers with a sentence rather than a bare name still resolves.
-    That is tolerant, but it is also why an agent whose name is a substring of
-    another would mis-route.
-
-    Module 4.3 replaces this with exact key matching on slugs plus structured
-    JSON output. When it does, this test SHOULD fail.
+    The old orchestrator.py:62-65 used substring matching, which caused
+    agent-name collisions. The new router never matches by substring.
     """
-    script.queue("I think this should go to the Technical Support Agent, definitely.")
+    script.queue(_classify_json("technical_support"))
     script.queue("reply")
 
     _, body = chat(client, "my app crashed", "Saarthi")
@@ -152,27 +156,12 @@ def test_substring_match_resolves_a_full_sentence(client, script):
     assert body["agent_name"] == "Technical Support Agent"
 
 
-def test_substring_match_is_case_insensitive(client, script):
-    """orchestrator.py:63 lowercases both sides."""
-    script.queue("technical support agent")
+def test_key_matching_is_case_normalised(client, script):
+    """get_by_key_exact() strips and lowercases the key before lookup."""
+    script.queue(_classify_json("TECHNICAL_SUPPORT", 0.9))
     script.queue("reply")
 
     _, body = chat(client, "my app crashed", "Saarthi")
 
+    # TECHNICAL_SUPPORT normalises to technical_support -> Technical Support Agent
     assert body["agent_name"] == "Technical Support Agent"
-
-
-def test_first_insertion_order_match_wins(client, script):
-    """DEFECT (pinned): when the classification text contains TWO agent names,
-    the winner is whichever appears first in `orchestrator.agents` -- not the
-    more specific match, and not the first mentioned in the text.
-
-    Health & Wellness is registered first (app.py:25), so it wins even though
-    Technical Support is named first in the response.
-    """
-    script.queue("Technical Support Agent or maybe Health & Wellness Agent")
-    script.queue("reply")
-
-    _, body = chat(client, "ambiguous", "Saarthi")
-
-    assert body["agent_name"] == "Health & Wellness Agent"

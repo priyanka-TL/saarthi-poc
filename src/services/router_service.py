@@ -155,7 +155,7 @@ class RouterService:
         # There is no YAML for "the router" -- it classifies, it doesn't answer.
         # Mirrors get_llm()'s own hardcoding (src/llm/__init__.py) and
         # config_mode_router.py's existing _router_model_spec().
-        from src.config import config
+        from src.settings import settings as config
         return ModelSpec(
             provider="openrouter",
             name=config.OPENROUTER_MODEL,

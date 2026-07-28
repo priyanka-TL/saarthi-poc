@@ -25,16 +25,7 @@ def test_reset_accepts_an_empty_body(client):
     assert response.status_code == 200
 
 
-def test_reset_clears_the_conversation_history(client, script, app_module):
-    script.queue("first")
-    chat(client, "hello", DEFAULT_AGENT)
-    assert app_module.chat_history != []
 
-    client.post("/api/reset")
-
-    assert app_module.chat_history == []
-    assert app_module.flow_stops == []
-    assert app_module.flow_title is None
 
 
 def test_reset_clears_the_flow_title(client, script):

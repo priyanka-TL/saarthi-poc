@@ -150,7 +150,8 @@ def test_current_index_always_trails_the_stops_length(client, script):
 
 def test_router_selected_agent_is_recorded_in_the_breadcrumb(client, script):
     """The stop records who ANSWERED, not what the client asked for."""
-    script.queue("Technical Support Agent")  # classification
+    import json
+    script.queue(json.dumps({"agent_key": "technical_support", "confidence": 0.9}))  # classification
     script.queue("reply")
 
     _, body = chat(client, "route me", "Saarthi")
