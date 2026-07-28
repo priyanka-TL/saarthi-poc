@@ -1,12 +1,15 @@
 import logging
 import json
-from flask import has_request_context, g
 from src.config import config
 
 class RequestIDFilter(logging.Filter):
     """Injects g.request_id into the log record if available."""
     def filter(self, record):
-        record.request_id = getattr(g, 'request_id', None) if has_request_context() else None
+        try:
+            from flask import has_request_context, g
+            record.request_id = getattr(g, 'request_id', None) if has_request_context() else None
+        except ImportError:
+            record.request_id = None
         return True
 
 class JSONFormatter(logging.Formatter):

@@ -13,5 +13,4 @@ migrate:
 	alembic upgrade head
 
 lint:
-	# Placeholder for linter
-	@echo "Linting..."
+	lint-imports

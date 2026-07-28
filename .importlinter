@@ -1,0 +1,42 @@
+[importlinter]
+root_package = src
+include_external_packages = True
+
+[importlinter:contract:agents_forbidden]
+name = Agents must not import repositories or flask
+type = forbidden
+source_modules =
+    src.agents
+forbidden_modules =
+    src.repositories
+    flask
+ignore_imports =
+    src.logger -> flask
+
+[importlinter:contract:repositories_forbidden]
+name = Repositories must not import services
+type = forbidden
+source_modules =
+    src.repositories
+forbidden_modules =
+    src.services
+
+[importlinter:contract:domain_pure]
+name = Domain layer must be pure and import nothing from other src packages
+type = forbidden
+source_modules =
+    src.domain
+forbidden_modules =
+    src.api
+    src.services
+    src.agents
+    src.llm
+    src.tools
+    src.integrations
+    src.repositories
+    src.db
+    src.state
+    src.app_factory
+    src.config
+    src.settings
+    src.logger
