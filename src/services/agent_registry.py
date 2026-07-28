@@ -101,9 +101,23 @@ class AgentRegistry:
     def routable(self) -> List[RegisteredAgent]:
         return [a for a in self._snapshot.values() if getattr(a.spec.routing, 'router_selectable', True)]
         
-    def get_by_key_exact(self, key: str) -> Optional[RegisteredAgent]:
-        return self._snapshot.get(key)
-        
+    _KEY_STRIP_CHARS = "'\" .,!?;:"
+
+    def get_by_key_exact(self, key: Optional[str]) -> Optional[RegisteredAgent]:
+        """Normalises (strip, lowercase, strip surrounding quotes/trailing
+        punctuation) then does an exact dict lookup. NEVER a substring scan --
+        this is the fix for the orchestrator.py:62-65 substring-collision bug,
+        applied to LLM-returned agent_key values that may carry stray quoting
+        or punctuation (design doc §6.3)."""
+        if not key:
+            return None
+        normalized = key.strip().lower().strip(self._KEY_STRIP_CHARS)
+        return self._snapshot.get(normalized)
+
+    def get_by_id(self, agent_id: str) -> Optional[RegisteredAgent]:
+        return next((a for a in self._snapshot.values() if a.id == agent_id), None)
+
+
     def get(self, key_or_legacy_name: str) -> Optional[RegisteredAgent]:
         if key_or_legacy_name in self._snapshot:
             return self._snapshot[key_or_legacy_name]
