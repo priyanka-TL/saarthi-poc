@@ -27,5 +27,18 @@ jobs:
     - name: Run linter
       run: make lint
       
+    - name: Start Database
+      run: |
+        docker compose up -d db
+        echo "Waiting for postgres..."
+        until docker compose exec db pg_isready -U postgres; do sleep 1; done
+        
+    - name: Run Database Migrations
+      env:
+        DATABASE_URL: postgresql://postgres@127.0.0.1:5433/postgres
+      run: |
+        make migrate
+        alembic check
+      
     - name: Run tests
       run: make test
