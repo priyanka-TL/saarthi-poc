@@ -34,6 +34,25 @@ class MessageRoleEnum(enum.Enum):
     system = "system"
     tool = "tool"
 
+class SessionStateEnum(enum.Enum):
+    pending = "pending"
+    authenticating = "authenticating"
+    in_progress = "in_progress"
+    awaiting_user = "awaiting_user"
+    finalizing = "finalizing"
+    completed = "completed"
+    failed = "failed"
+    abandoned = "abandoned"
+
+class AuditActionEnum(enum.Enum):
+    config_sync = "config_sync"
+    config_create = "config_create"
+    config_activate = "config_activate"
+    agent_enable = "agent_enable"
+    agent_disable = "agent_disable"
+    session_finalize = "session_finalize"
+    session_abandon = "session_abandon"
+
 class Conversation(Base):
     __tablename__ = "conversations"
 
@@ -112,5 +131,81 @@ class ConversationMessage(Base):
         Index("ix_msg_agent_time", "agent_id", sa.text("created_at DESC")),
         Index("ix_msg_request", "request_id", postgresql_where=sa.text("request_id IS NOT NULL")),
         Index("ix_msg_session", "agent_session_id", postgresql_where=sa.text("agent_session_id IS NOT NULL")),
+    )
+
+class AgentSession(Base):
+    __tablename__ = "agent_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()"))
+    conversation_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False)
+
+    # FK deferred: no Agent ORM model exists yet (agents/agent_configurations are
+    # accessed via raw SQL only -- see src/services/config_sync.py, agent_registry.py).
+    # Declaring ForeignKey("agents.id") here without an Agent class registered in
+    # Base.metadata raises sqlalchemy.exc.NoReferencedTableError at DDL-compile time
+    # (verified directly). The DB-level FK (fk_agent_sessions_agent_id_agents,
+    # ON DELETE RESTRICT) already exists via migration 0003's raw ForeignKeyConstraint.
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+
+    state: Mapped[SessionStateEnum] = mapped_column(
+        sa.Enum(SessionStateEnum, name="session_state_enum", create_type=False),
+        nullable=False,
+        server_default="pending"
+    )
+
+    remote_provider: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    remote_session_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    remote_profile_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    remote_flow: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    remote_bot_route: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    language: Mapped[str] = mapped_column(String, nullable=False, server_default="en")
+    step: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    turn_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+
+    result_ref: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    report_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    error: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    error_code: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    state_data: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=sa.text("'{}'::jsonb"))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    last_activity_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    finalized_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("remote_session_id", name="uq_sess_remote"),
+        CheckConstraint("language IN ('en', 'hi', 'kn', 'te')", name="sess_lang"),
+        CheckConstraint("step >= 0 AND turn_count >= 0", name="sess_step"),
+        CheckConstraint("(state IN ('completed', 'failed', 'abandoned')) = (ended_at IS NOT NULL)", name="sess_terminal"),
+        CheckConstraint("state IN ('pending', 'failed', 'abandoned') OR remote_session_id IS NOT NULL", name="sess_active_has_remote"),
+        CheckConstraint("state <> 'completed' OR result_ref IS NOT NULL", name="sess_completed_has_result"),
+        Index("uq_sess_one_open_per_conv", "conversation_id", unique=True,
+              postgresql_where=sa.text("state NOT IN ('completed', 'failed', 'abandoned')")),
+        Index("ix_sess_sweep", "state", "last_activity_at",
+              postgresql_where=sa.text("state NOT IN ('completed', 'failed', 'abandoned')")),
+        Index("ix_sess_conv", "conversation_id", sa.text("started_at DESC")),
+    )
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(sa.BigInteger, primary_key=True, autoincrement=True)
+    action: Mapped[AuditActionEnum] = mapped_column(
+        sa.Enum(AuditActionEnum, name="audit_action_enum", create_type=False),
+        nullable=False
+    )
+    entity_type: Mapped[str] = mapped_column(String, nullable=False)
+    entity_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
+    actor: Mapped[str] = mapped_column(String, nullable=False, server_default="system")
+    request_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    before: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    after: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        Index("ix_audit_entity", "entity_type", "entity_id", sa.text("created_at DESC")),
+        Index("ix_audit_action_time", "action", sa.text("created_at DESC")),
     )
 
