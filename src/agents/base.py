@@ -39,13 +39,14 @@ class BaseAgent(ABC):
             ])
             self.chain = prompt | self.llm | StrOutputParser()
         
-    def process(self, request: str, history: list = None) -> str:
+    def process(self, request: str, history: list = None) -> dict:
         """
-        Process the user's request and return a response using the LCEL chain or custom tool executor.
+        Process the user's request and return a dict with 'content' and 'sources'.
         """
         try:
             if self.has_tools:
                 from langchain_core.messages import ToolMessage
+                import json
                 
                 # Initialize conversation history with system instructions
                 messages = [SystemMessage(content=self.system_prompt)]
@@ -64,9 +65,10 @@ class BaseAgent(ABC):
                 # Bind our custom tools (like web search) directly to the LLM
                 llm_with_tools = self.llm.bind_tools(self.tools)
                 
-                # We use a loop to handle multi-step reasoning (e.g. LLM searches -> gets results -> searches again)
+                # We use a loop to handle multi-step reasoning
                 max_iterations = 3
                 last_tool_result = ""
+                collected_sources = []
                 
                 for _ in range(max_iterations):
                     # Step 1: Ask the LLM what to do
@@ -74,7 +76,7 @@ class BaseAgent(ABC):
                     
                     # Step 2: If the LLM didn't call any tools, it means it generated a final answer!
                     if not response.tool_calls:
-                        return response.content or "I couldn't generate a clear answer."
+                        return {"content": response.content or "I couldn't generate a clear answer.", "sources": collected_sources}
                     
                     # Step 3: The LLM asked to use a tool. Add its request to the history.
                     messages.append(response)
@@ -86,6 +88,12 @@ class BaseAgent(ABC):
                             try:
                                 # Run the actual Python function
                                 result = tool_func.invoke(tool_call['args'])
+                                try:
+                                    res_json = json.loads(result)
+                                    if "sources" in res_json:
+                                        collected_sources.extend(res_json["sources"])
+                                except json.JSONDecodeError:
+                                    pass
                             except Exception as e:
                                 result = f"Error: {str(e)}"
                             last_tool_result = str(result)
@@ -93,13 +101,10 @@ class BaseAgent(ABC):
                             # Append the tool's result back into the history so the LLM can read it
                             messages.append(ToolMessage(content=last_tool_result, tool_call_id=tool_call['id']))
                 
-                # Fallback: If we exceed max iterations and the LLM is stuck in an infinite tool-calling loop,
-                # we force it to generate a final response, or we just dump the raw data to the user.
+                # Fallback
                 final_response = llm_with_tools.invoke(messages)
-                if not final_response.content:
-                    return f"Here is the raw data I found:\n{last_tool_result}"
-                    
-                return final_response.content
+                content = final_response.content if final_response.content else f"Here is the raw data I found:\n{last_tool_result}"
+                return {"content": content, "sources": collected_sources}
             else:
                 # ---------------------------------------------------------
                 # Standard Execution (No Tools)
@@ -113,11 +118,12 @@ class BaseAgent(ABC):
                         else:
                             formatted_history.append(("ai", msg.get("content", "")))
                             
-                return self.chain.invoke({
+                content = self.chain.invoke({
                     "request": request,
                     "history": formatted_history
                 })
+                return {"content": content, "sources": []}
         except Exception as e:
             import traceback
             traceback.print_exc()
-            return f"I encountered an error processing your request: {str(e)}"
+            return {"content": f"I encountered an error processing your request: {str(e)}", "sources": []}

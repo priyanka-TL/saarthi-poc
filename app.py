@@ -53,8 +53,8 @@ def chat():
         if target_agent and target_agent != "NovaAssist":
             if target_agent in orchestrator.agents:
                 agent = orchestrator.agents[target_agent]
-                response = agent.process(user_message, chat_history)
-                result = {"agent_name": agent.name, "response": response}
+                res_dict = agent.process(user_message, chat_history)
+                result = {"agent_name": agent.name, "response": res_dict["content"], "sources": res_dict.get("sources", [])}
             else:
                 return jsonify({"error": "Agent not found"}), 404
         else:
@@ -69,6 +69,7 @@ def chat():
         return jsonify({
             "agent_name": result["agent_name"],
             "response": result["response"],
+            "sources": result.get("sources", []),
             "status": "success"
         })
     except Exception as e:

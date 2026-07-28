@@ -83,7 +83,7 @@ document.addEventListener('DOMContentLoaded', () => {
         chatMessages.scrollTop = chatMessages.scrollHeight;
     }
 
-    function addMessage(content, type, agentName = null) {
+    function addMessage(content, type, agentName = null, sources = []) {
         const messageDiv = document.createElement('div');
         messageDiv.className = `message ${type}`;
 
@@ -104,6 +104,40 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         messageDiv.appendChild(contentDiv);
+        
+        if (sources && sources.length > 0) {
+            const sourcesContainer = document.createElement('div');
+            sourcesContainer.className = 'sources-container';
+            
+            const sourcesHeader = document.createElement('div');
+            sourcesHeader.className = 'sources-header';
+            sourcesHeader.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg> Sources: (${sources.length} citations)`;
+            sourcesContainer.appendChild(sourcesHeader);
+            
+            const cardsWrapper = document.createElement('div');
+            cardsWrapper.className = 'source-cards-wrapper';
+            
+            sources.forEach(source => {
+                const card = document.createElement('a');
+                card.className = 'source-card';
+                card.href = source.url;
+                card.target = '_blank';
+                card.rel = 'noopener noreferrer';
+                
+                let iconChar = source.domain ? source.domain.charAt(0).toUpperCase() : 'W';
+                
+                card.innerHTML = `
+                    <div class="source-card-icon">${iconChar}</div>
+                    <div class="source-card-title">${source.title}</div>
+                    <div class="source-card-domain">${source.domain || 'Link'}</div>
+                `;
+                cardsWrapper.appendChild(card);
+            });
+            
+            sourcesContainer.appendChild(cardsWrapper);
+            messageDiv.appendChild(sourcesContainer);
+        }
+
         chatMessages.appendChild(messageDiv);
         scrollToBottom();
     }
@@ -148,7 +182,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     lastAgent = data.agent_name;
                 }
                 // Add agent response
-                addMessage(data.response, 'agent', data.agent_name);
+                addMessage(data.response, 'agent', data.agent_name, data.sources);
             } else {
                 addMessage(data.error || 'An error occurred.', 'system');
             }
