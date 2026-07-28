@@ -11,3 +11,7 @@ __pycache__/
 
 # Mac OS
 .DS_Store
+
+# pytest
+.pytest_cache/
+.env

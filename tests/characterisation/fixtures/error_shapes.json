@@ -1,0 +1,15 @@
+{
+  "_comment": "Error response bodies as of module 1.1. NOTE the asymmetry pinned in test_known_defects.py: success responses carry a 'status' key, these do not. static/js/main.js only checks `data.status === 'success'`, so an error is detected by absence rather than by a code. Module 5.7 introduces a typed error model with 'status' and 'error_code'.",
+  "agent_not_found": {
+    "status_code": 404,
+    "body": { "error": "Agent not found" }
+  },
+  "no_message": {
+    "status_code": 400,
+    "body": { "error": "No message provided" }
+  },
+  "empty_body": {
+    "status_code": 400,
+    "body": { "error": "No message provided" }
+  }
+}

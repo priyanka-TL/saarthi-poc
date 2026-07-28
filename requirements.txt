@@ -7,3 +7,10 @@ langchain-community>=0.2.0
 litellm>=1.93.0
 langchain-litellm>=0.7.0
 ddgs>=9.14.4
+
+# ---- test dependencies (module 1.1) ----
+# Pinned exactly. pytest-socket blocks all network access during the suite, so a
+# mis-wired stub fails loudly instead of silently making live, billed API calls.
+pytest==9.1.1
+pytest-socket==0.8.0
+

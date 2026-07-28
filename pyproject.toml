@@ -1,0 +1,9 @@
+[tool.pytest.ini_options]
+# `src/` is a namespace package (there is deliberately no src/__init__.py), so the
+# repo root must be on sys.path for `from src.llm import ...` to resolve.
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "--disable-socket"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
