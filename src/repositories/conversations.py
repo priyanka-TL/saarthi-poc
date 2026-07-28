@@ -26,11 +26,19 @@ class ConversationRepository:
                 Conversation.tenant_code == user.tenant_code,
                 Conversation.external_user_id == user.user_id,
             )
-            conv = self._session.execute(stmt).scalar_one_or_none()
-            if conv:
-                return ConversationDTO.model_validate(conv)
+        else:
+            # Resolve the most recent active conversation for the user
+            stmt = select(Conversation).where(
+                Conversation.tenant_code == user.tenant_code,
+                Conversation.external_user_id == user.user_id,
+                Conversation.status == ConversationStatusEnum.active
+            ).order_by(Conversation.last_message_at.desc().nullslast()).limit(1)
 
-        # Not found or no ID provided -> Create new
+        conv = self._session.execute(stmt).scalar_one_or_none()
+        if conv:
+            return ConversationDTO.model_validate(conv)
+
+        # Not found -> Create new
         new_conv = Conversation(
             id=conversation_id or uuid.uuid4(),
             tenant_code=user.tenant_code,

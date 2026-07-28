@@ -120,6 +120,23 @@ def reset_globals(request):
         import app as app_mod
 
         app_mod._reset_flow()
+        
+        # In postgres mode, we must completely wipe the DB state to ensure test isolation
+        # because the static user would otherwise pick up stale conversations from prior tests.
+        from src.settings import settings
+        if settings.saarthi_persistence == "postgres":
+            from src.db.engine import SessionLocal
+            from sqlalchemy import text
+            with SessionLocal() as db_session:
+                db_session.execute(text("DELETE FROM conversation_messages;"))
+                db_session.execute(text("DELETE FROM conversations;"))
+                db_session.commit()
+                
+            # Also call /api/reset to clear any memory state just in case, though
+            # we mainly rely on the DB delete.
+            client = request.getfixturevalue("client")
+            client.post("/api/reset")
+        
         yield
         app_mod._reset_flow()
     else:

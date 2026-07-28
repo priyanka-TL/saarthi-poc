@@ -31,11 +31,22 @@ def before_request():
 def after_request(response):
     """
     Echoes the request ID back in the X-Request-ID header.
-    Closes the DB session.
     """
-    if hasattr(g, 'db_session'):
-        g.db_session.close()
-
     if hasattr(g, 'request_id'):
         response.headers['X-Request-ID'] = g.request_id
     return response
+
+def teardown_request(exc):
+    """
+    Commits the DB session on success, rolls back on exception, and closes it.
+    Route handlers must NEVER call commit().
+    """
+    db_session = getattr(g, 'db_session', None)
+    if db_session is not None:
+        try:
+            if exc is None:
+                db_session.commit()
+            else:
+                db_session.rollback()
+        finally:
+            db_session.close()

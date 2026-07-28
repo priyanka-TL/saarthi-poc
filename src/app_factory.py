@@ -17,8 +17,9 @@ def create_app():
     app.register_blueprint(agent_bp)
 
     # Register request hooks
-    from src.api.deps import before_request, after_request
+    from src.api.deps import before_request, after_request, teardown_request
     app.before_request(before_request)
     app.after_request(after_request)
+    app.teardown_request(teardown_request)
 
     return app
