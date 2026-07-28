@@ -19,4 +19,4 @@ db-shell:
 	docker compose exec db psql -U postgres
 
 lint:
-	lint-imports
+	uv run lint-imports
