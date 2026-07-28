@@ -30,6 +30,13 @@ class Settings(BaseSettings):
     mitra_enabled: int = 0
     saarthi_admin_enabled: int = 0
 
+    # ---- auth / jwt ----
+    saarthi_jwt_secret: Optional[str] = None
+    saarthi_jwt_verify_exp: bool = True
+    saarthi_static_token: Optional[str] = None
+    jwt_identifier_field: str = "id"
+    jwt_email_suffix: str = "@shikshalokam.org"
+
 try:
     settings = Settings()
 except ValidationError as e:

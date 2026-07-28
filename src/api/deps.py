@@ -9,8 +9,19 @@ def before_request():
     request_id = request.headers.get("X-Request-ID")
     if not request_id:
         request_id = uuid.uuid4().hex
-    
     g.request_id = request_id
+
+    # Authenticate and extract user
+    from flask import current_app
+    provider = current_app.config.get("USER_PROVIDER")
+    if provider:
+        # For POC, if auth fails due to missing header in non-static mode, it raises
+        try:
+            g.user = provider.get_user(request)
+        except Exception as e:
+            from werkzeug.exceptions import Unauthorized
+            raise Unauthorized(str(e))
+
 
 def after_request(response):
     """

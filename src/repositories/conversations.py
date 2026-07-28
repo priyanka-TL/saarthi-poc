@@ -34,7 +34,7 @@ class ConversationRepository:
         new_conv = Conversation(
             id=conversation_id or uuid.uuid4(),
             tenant_code=user.tenant_code,
-            organization_id=user.organization_id,
+            organization_id=user.active_org_id,
             external_user_id=user.user_id,
             locale=user.locale,
             status=ConversationStatusEnum.active,
