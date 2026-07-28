@@ -49,16 +49,20 @@ def build_container(settings: Settings) -> Container:
 
     llm_factory = LlmFactory()
 
-    # mitra_rest / mitra_sessions: no MitraRestClient/MitraSessionManager
-    # implementation exists yet (src/integrations/ is an empty package) and
-    # mitra_enabled defaults to 0. HandlerDeps requires all 5 fields;
-    # tests/unit/test_llm_handler.py already proves None is a safe value here
-    # -- LlmAgentHandler never touches these two fields, and no "remote_flow"
-    # handler is registered yet to need them.
+    # mitra_rest: built when mitra_enabled is set. When disabled (the default)
+    # the client is None and LlmAgentHandler is unaffected -- it never touches
+    # these two fields. RemoteFlowAgentHandler will check for None and raise
+    # a clear error if an operator enables a remote_flow agent without setting
+    # MITRA_BASE_URL etc.
+    mitra_rest = None
+    if settings.mitra_enabled:
+        from src.integrations.mitra.rest_client import from_settings as build_mitra_rest
+        mitra_rest = build_mitra_rest(settings)
+
     deps = HandlerDeps(
         llm_factory=llm_factory,
         tool_registry=tool_registry,
-        mitra_rest=None,
+        mitra_rest=mitra_rest,
         mitra_sessions=None,
         settings=settings,
     )

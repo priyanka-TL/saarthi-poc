@@ -21,5 +21,6 @@ websocket-client
 json-repair
 gunicorn
 pytest-cov
+responses
 PyJWT
 import-linter

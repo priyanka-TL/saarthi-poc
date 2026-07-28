@@ -34,6 +34,23 @@ class Settings(BaseSettings):
     jwt_identifier_field: str = "id"
     jwt_email_suffix: str = "@shikshalokam.org"
 
+    # ---- mitra REST ----
+    # MITRA_ORIGIN_URL is a credential: Mitra gates admission on the Origin
+    # header. Never log it, never include it in error responses, never put
+    # it in YAML. See design doc §13.2 and the comment in MitraRestClient.
+    mitra_base_url: str = "https://mitra.example.com"
+    mitra_origin_url: str = "https://mitra.example.com"
+    mitra_user_agent: str = (
+        "Mozilla/5.0 (X11; Linux x86_64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    )
+    # Comma-separated EXTRA hostnames allowed in returned URLs (the
+    # mitra_base_url hostname is always included automatically).
+    mitra_allowed_hosts: str = ""
+    mitra_connect_timeout_s: float = 10.0
+    mitra_read_timeout_s: float = 30.0
+
 try:
     settings = Settings()
 except ValidationError as e:
