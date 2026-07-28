@@ -3,8 +3,12 @@ from typing import Optional, List, Dict
 import time
 from sqlalchemy import text
 
+from pydantic import TypeAdapter
+
 from src.logger import get_logger
 from src.domain.agent_spec import AgentSpec
+
+_agent_spec_adapter = TypeAdapter(AgentSpec)
 
 logger = get_logger("agent_registry")
 
@@ -16,6 +20,7 @@ class RegisteredAgent:
     description: str
     agent_type: str
     is_default: bool
+    checksum: str
     spec: AgentSpec
 
 class AgentRegistry:
@@ -31,19 +36,19 @@ class AgentRegistry:
         try:
             # Query enabled agents joined with their active configuration
             query = text("""
-                SELECT a.id, a.key, a.name, a.description, a.agent_type, a.is_default, a.updated_at, c.config
+                SELECT a.id, a.key, a.name, a.description, a.agent_type, a.is_default, a.updated_at, c.config, c.checksum
                 FROM agents a
                 JOIN agent_configurations c ON a.id = c.agent_id
                 WHERE a.status = 'enabled' AND c.is_active = TRUE
             """)
             result = session.execute(query).fetchall()
-            
+
             new_snapshot = {}
             new_legacy = {}
             max_ts = None
-            
+
             for row in result:
-                spec = AgentSpec.model_validate(row.config)
+                spec = _agent_spec_adapter.validate_python(row.config)
                 agent = RegisteredAgent(
                     id=str(row.id),
                     key=row.key,
@@ -51,6 +56,7 @@ class AgentRegistry:
                     description=row.description,
                     agent_type=row.agent_type,
                     is_default=row.is_default,
+                    checksum=row.checksum,
                     spec=spec
                 )
                 new_snapshot[agent.key] = agent

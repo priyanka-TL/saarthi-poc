@@ -8,6 +8,7 @@ byte-for-byte when the four hardcoded agents become YAML.
 
 from __future__ import annotations
 
+from src.settings import settings
 from tests.characterisation.conftest import AGENT_NAMES
 
 SYNTHETIC_ROUTER_ENTRY = {
@@ -17,10 +18,17 @@ SYNTHETIC_ROUTER_ENTRY = {
 
 
 def test_matches_golden_exactly(client, golden):
-    """The whole response, locked. Any drift here is a breaking change."""
+    """The whole response, locked. Any drift here is a breaking change.
+
+    SAARTHI_REGISTRY=code is the revert path and must still return the
+    pre-Module-3.9 shape byte-for-byte (`api_agents.json`). SAARTHI_REGISTRY=
+    config gains the additive fields Module 3.9 introduces, goldened
+    separately as `api_agents_config.json`.
+    """
     response = client.get("/api/agents")
     assert response.status_code == 200
-    assert response.get_json() == golden("api_agents")
+    fixture = "api_agents" if settings.saarthi_registry == "code" else "api_agents_config"
+    assert response.get_json() == golden(fixture)
 
 
 def test_first_element_is_the_synthetic_router_entry(client):
@@ -44,14 +52,25 @@ def test_agent_order_matches_registration_order(client):
 
 
 def test_entries_carry_only_name_and_description(client):
-    """No `key`, no `id`, no `agent_type` yet.
+    """SAARTHI_REGISTRY=code: no `key`, no `id`, no `agent_type` -- the
+    pre-Module-3.9 shape, pinned forever as the revert path.
 
-    Module 3.9 adds those additively. This test proves they are absent today,
-    so the addition is visible rather than assumed.
+    SAARTHI_REGISTRY=config: Module 3.9 adds those fields additively to every
+    real-agent entry; the synthetic Saarthi entry keeps the original 2-key
+    shape in both modes.
     """
     body = client.get("/api/agents").get_json()
-    for entry in body:
-        assert set(entry) == {"name", "description"}
+    if settings.saarthi_registry == "code":
+        for entry in body:
+            assert set(entry) == {"name", "description"}
+    else:
+        assert set(body[0]) == {"name", "description"}
+        additive = {
+            "name", "description", "key", "agent_type", "capabilities",
+            "status", "sort_order", "supports_options", "pin_session",
+        }
+        for entry in body[1:]:
+            assert set(entry) == additive
 
 
 def test_response_is_a_list_not_an_envelope(client):

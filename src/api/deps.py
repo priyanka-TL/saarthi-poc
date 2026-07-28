@@ -27,6 +27,13 @@ def before_request():
     from src.db.engine import SessionLocal
     g.db_session = SessionLocal()
 
+    # TTL-gated agent registry reload, config mode only, /api/ paths only.
+    from src.settings import settings
+    if settings.saarthi_registry == "config" and request.path.startswith("/api/"):
+        container = current_app.config.get("CONTAINER")
+        if container is not None:
+            container.agent_registry.maybe_reload(g.db_session)
+
 
 def after_request(response):
     """

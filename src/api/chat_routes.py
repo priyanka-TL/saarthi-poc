@@ -8,6 +8,38 @@ from src.settings import settings
 
 chat_bp = Blueprint("chat_routes", __name__)
 
+
+def _history_turns(history_dicts):
+    from src.agents.protocol import HistoryTurn
+    return [
+        HistoryTurn(role=h.get("role"), content=h.get("content", ""), agent_key=None)
+        for h in history_dicts
+    ]
+
+
+def _execute_llm_agent(container, reg, user_message, history, conversation_id):
+    """Config-mode execution backend: builds a TurnContext, dispatches through
+    HandlerFactory/LlmAgentHandler, and adapts the result back into the same
+    {"agent_name", "response"} shape orchestrator.handle_request() / a direct
+    agent.process() call already produce -- so nothing downstream of this
+    function needs to change."""
+    from src.agents.protocol import TurnContext
+
+    handler = container.handler_factory.build(reg.spec, reg.checksum)
+    ctx = TurnContext(
+        request_id=g.request_id,
+        conversation_id=conversation_id or uuid.uuid4(),
+        user=g.user,
+        text=user_message,
+        option_id=None,
+        history=_history_turns(history),
+        session=None,
+        locale=getattr(g.user, "locale", "en"),
+    )
+    turn = handler.handle(ctx)
+    return {"agent_name": reg.name, "response": turn.text}
+
+
 @chat_bp.route("/")
 def index():
     """Serves the main chat interface."""
@@ -53,21 +85,46 @@ def chat():
         # Memory mode
         history = global_state.chat_history
 
-    # Pass the message to our Orchestrator or a specific agent
+    # Pass the message to our Orchestrator or a specific agent.
+    #
+    # SAARTHI_REGISTRY=code: unchanged -- specialized.py/orchestrator.py serve
+    # every request, exactly as before this module.
+    # SAARTHI_REGISTRY=config: AgentRegistry + HandlerFactory/LlmAgentHandler
+    # serve every request instead; the implicit "Saarthi" routing decision is
+    # replaced by config_mode_router.decide_sub_agent, which reproduces the
+    # SAME LLM-classification approach orchestrator.py uses, just retargeted
+    # at registry entries -- only the execution backend differs.
     try:
+        conv_id = conv.id if is_postgres else None
+
         if target_agent and target_agent != "Saarthi":
-            if target_agent in orchestrator.agents:
-                agent = orchestrator.agents[target_agent]
-                response = agent.process(user_message, history)
-                result = {"agent_name": agent.name, "response": response}
+            if settings.saarthi_registry == "code":
+                if target_agent in orchestrator.agents:
+                    agent = orchestrator.agents[target_agent]
+                    response = agent.process(user_message, history)
+                    result = {"agent_name": agent.name, "response": response}
+                else:
+                    return jsonify({"error": "Agent not found"}), 404
             else:
-                # In postgres mode with target_agent != Saarthi, we can look up by key or name.
-                # Actually, orchestrator.agents is keyed by agent.name or agent_key?
-                # The existing codebase keys by agent.name.
-                return jsonify({"error": "Agent not found"}), 404
+                container = current_app.config["CONTAINER"]
+                reg = container.agent_registry.get(target_agent)
+                if reg is None:
+                    return jsonify({"error": "Agent not found"}), 404
+                result = _execute_llm_agent(container, reg, user_message, history, conv_id)
         else:
-            result = orchestrator.handle_request(user_message, history)
-        
+            if settings.saarthi_registry == "code":
+                result = orchestrator.handle_request(user_message, history)
+            else:
+                container = current_app.config["CONTAINER"]
+                from src.services.config_mode_router import decide_sub_agent
+                reg = decide_sub_agent(
+                    container.llm_factory,
+                    container.agent_registry.routable(),
+                    container.agent_registry.default(),
+                    user_message,
+                )
+                result = _execute_llm_agent(container, reg, user_message, history, conv_id)
+
         if is_postgres:
             # 4. Persist assistant response
             svc.persist_assistant_message(conv.id, result["response"], result["agent_name"])

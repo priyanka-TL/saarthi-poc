@@ -29,7 +29,7 @@ import os
 os.environ["OPENROUTER_API_KEY"] = "test-key-never-used"
 os.environ["OPENROUTER_MODEL"] = "test/scripted-model"
 os.environ["LLM_TIMEOUT"] = "1"
-os.environ["LLM_MAX_RETRIES"] = "0"
+os.environ["LLM_MAX_RETRIES"] = "1"
 os.environ["LOG_LEVEL"] = "CRITICAL"
 
 # ---------------------------------------------------------------------------
@@ -51,6 +51,21 @@ def _fake_get_llm(temperature: float = 0.0) -> ScriptedChatModel:
 
 src.llm.get_llm = _fake_get_llm  # type: ignore[assignment]
 
+# The SAARTHI_REGISTRY=config path resolves its LLM client via
+# LlmFactory.get(spec) (src/llm/factory.py), a different call site than the
+# free-function src.llm.get_llm patched above. It's only ever invoked lazily
+# (inside HandlerFactory.build(), itself called per-request), so patching the
+# class method here -- at import time, well before any request -- is safe and
+# has none of the fragile import-ordering constraints get_llm's patch has.
+from src.llm.factory import LlmFactory  # noqa: E402
+
+
+def _fake_llm_factory_get(self, spec) -> ScriptedChatModel:
+    return SHARED_MODEL
+
+
+LlmFactory.get = _fake_llm_factory_get  # type: ignore[assignment]
+
 import pytest  # noqa: E402
 
 
@@ -62,6 +77,12 @@ import pytest  # noqa: E402
 @pytest.fixture(scope="session")
 def app_module():
     """Import ``app`` and prove the stub actually took effect.
+
+    Returns the ``app`` MODULE (not the Flask instance) -- callers that need
+    module-level globals (``orchestrator``, ``chat_history``, ``flow_stops``,
+    ``flow_title``) read them off this fixture directly. Use the ``flask_app``
+    fixture for the Flask application instance itself (e.g. to build a test
+    client).
 
     The assertions below are the suite's most important safety net. Without
     them, a mis-ordered import produces a *green* run that silently makes live,
@@ -89,13 +110,19 @@ def app_module():
         "Expected exactly 4 registered agents; the characterisation fixtures "
         "encode that count."
     )
-    return app_mod.app
+    return app_mod
 
 
 @pytest.fixture()
-def client(app_module):
+def flask_app(app_module):
+    """The Flask application instance (as opposed to the ``app`` module)."""
+    return app_module.app
+
+
+@pytest.fixture()
+def client(flask_app):
     """A test client for the Flask application."""
-    return app_module.test_client()
+    return flask_app.test_client()
 
 
 @pytest.fixture()
@@ -116,11 +143,26 @@ def reset_globals(request):
     reassigning the globals directly --- that keeps the fixture honest, and it
     exercises the reset path on every single test.
     """
-    if "app_module" in request.fixturenames or "client" in request.fixturenames:
+    if (
+        "app_module" in request.fixturenames
+        or "flask_app" in request.fixturenames
+        or "client" in request.fixturenames
+    ):
         import app as app_mod
 
         app_mod._reset_flow()
-        
+
+        # HandlerFactory caches LlmAgentHandler instances per (key, checksum)
+        # across requests -- correct production behaviour (tool bindings
+        # shouldn't be rebuilt every turn), but it means bind_tools() is only
+        # ever called once per agent for the life of the (session-scoped)
+        # container, not once per test. Clear it so tests that inspect
+        # script.bound_tools see a fresh call every time, same as the old
+        # per-turn bind_tools() call in src/agents/base.py did.
+        container = app_mod.app.config.get("CONTAINER")
+        if container is not None:
+            container.handler_factory._cache.clear()
+
         # In postgres mode, we must completely wipe the DB state to ensure test isolation
         # because the static user would otherwise pick up stale conversations from prior tests.
         from src.settings import settings
@@ -145,14 +187,16 @@ def reset_globals(request):
 
 @pytest.fixture()
 def fake_ddgs(monkeypatch):
-    """Replace the search provider inside ``src.tools``.
+    """Replace the search provider inside ``src.tools.search_tools``.
 
-    ``src/tools.py:2`` does ``from ddgs import DDGS``, so the name to patch is
-    ``src.tools.DDGS`` --- patching ``ddgs.DDGS`` would be too late.
+    ``src/tools/search_tools.py:2`` does ``from ddgs import DDGS`` into ITS OWN
+    module namespace, so the name to patch is ``src.tools.search_tools.DDGS``
+    --- patching ``src.tools.DDGS`` (the package, not the submodule) or
+    ``ddgs.DDGS`` would be too late/wrong target.
     """
-    import src.tools
+    import src.tools.search_tools
 
     FakeDDGS.reset()
-    monkeypatch.setattr(src.tools, "DDGS", FakeDDGS)
+    monkeypatch.setattr(src.tools.search_tools, "DDGS", FakeDDGS)
     yield FakeDDGS
     FakeDDGS.reset()

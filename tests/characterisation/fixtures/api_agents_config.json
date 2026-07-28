@@ -1,0 +1,50 @@
+[
+  {
+    "name": "Saarthi",
+    "description": "Automatically routes your request to the best agent"
+  },
+  {
+    "name": "Health & Wellness Agent",
+    "description": "Provides general health, fitness, diet, and wellness tips. Does not provide medical diagnoses.",
+    "key": "health_wellness",
+    "agent_type": "llm",
+    "capabilities": ["health_qa"],
+    "status": "enabled",
+    "sort_order": 10,
+    "supports_options": false,
+    "pin_session": false
+  },
+  {
+    "name": "Technical Support Agent",
+    "description": "Handles technical issues like bugs, errors, login failures, broken features, and installation problems.",
+    "key": "technical_support",
+    "agent_type": "llm",
+    "capabilities": ["troubleshooting"],
+    "status": "enabled",
+    "sort_order": 20,
+    "supports_options": false,
+    "pin_session": false
+  },
+  {
+    "name": "General Support Agent",
+    "description": "Handles general inquiries, business hours, and fallback for unrecognized requests.",
+    "key": "general_support",
+    "agent_type": "llm",
+    "capabilities": ["general_qa", "fallback"],
+    "status": "enabled",
+    "sort_order": 30,
+    "supports_options": false,
+    "pin_session": false
+  },
+  {
+    "name": "Research & Web Agent",
+    "description": "Searches the web and YouTube for information, tutorials, links, and references.",
+    "key": "research",
+    "agent_type": "llm",
+    "capabilities": ["web_search", "video_search", "citation"],
+    "status": "enabled",
+    "sort_order": 40,
+    "supports_options": false,
+    "pin_session": false
+  }
+]
