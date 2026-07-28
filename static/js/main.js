@@ -10,10 +10,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const sidebar = document.getElementById('sidebar');
     const sidebarOverlay = document.getElementById('sidebar-overlay');
     const newChatBtn = document.getElementById('new-chat-btn');
-    const flowBar = document.getElementById('flow-bar');
-    const flowTitleEl = document.getElementById('flow-title');
-    const flowStopLabel = document.getElementById('flow-stop-label');
-    const flowSteps = document.getElementById('flow-steps');
     const root = document.documentElement;
 
     const BOT_AVATAR_SVG = `
@@ -100,7 +96,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (titleEl) {
                 const name = titleEl.textContent;
                 currentSelectedAgent = name;
-                
+
                 const banner = document.getElementById('active-context-banner');
                 const contextNameEl = document.getElementById('context-name');
                 const subContextNameEl = document.getElementById('sub-context-name');
@@ -137,7 +133,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     clearActiveItems();
                     li.classList.add('active');
                     currentSelectedAgent = agent.name;
-                    
+
                     const banner = document.getElementById('active-context-banner');
                     const contextNameEl = document.getElementById('context-name');
                     const subContextNameEl = document.getElementById('sub-context-name');
@@ -221,38 +217,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     let lastAgent = null;
 
-    function renderFlow(flow) {
-        if (!flow || !flow.stops || flow.stops.length === 0) {
-            flowTitleEl.textContent = 'Home';
-            flowSteps.classList.add('hidden');
-            flowSteps.innerHTML = '';
-            return;
-        }
-
-        flowTitleEl.textContent = flow.title;
-        flowSteps.classList.remove('hidden');
-
-        flowSteps.innerHTML = '';
-        flow.stops.forEach((agentName, index) => {
-            if (index > 0) {
-                const chevron = document.createElement('span');
-                chevron.className = 'flow-step-connector';
-                chevron.textContent = '›';
-                flowSteps.appendChild(chevron);
-            }
-
-            const step = document.createElement('div');
-            step.className = `flow-step ${index === flow.current_index ? 'active' : 'done'}`;
-            step.innerHTML = `
-                <span class="flow-step-dot"></span>
-                <span class="flow-step-text">
-                    <span class="flow-step-name">${agentName}</span>
-                    <span class="flow-step-sublabel">${index === flow.current_index ? 'In progress' : 'Handled'}</span>
-                </span>`;
-            flowSteps.appendChild(step);
-        });
-    }
-
     async function resetConversation() {
         try {
             await fetch('/api/reset', { method: 'POST' });
@@ -262,7 +226,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
         chatMessages.innerHTML = '';
         addMessage("Namaste. How can I help you today?", 'system');
-        renderFlow(null);
         lastAgent = null;
 
         if (window.innerWidth <= 768) {
@@ -320,7 +283,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 // Add agent response
                 addMessage(data.response, 'agent', data.agent_name);
-                renderFlow(data.flow);
             } else {
                 addMessage(data.error || 'An error occurred.', 'system');
             }

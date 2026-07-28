@@ -144,51 +144,15 @@
         </aside>
 
         <div class="chat-container">
-            <div id="flow-bar" class="flow-bar">
-                <div class="flow-bar-title">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                        stroke-linejoin="round" width="16" height="16">
-                        <circle cx="6" cy="6" r="2.5"></circle>
-                        <circle cx="6" cy="18" r="2.5"></circle>
-                        <circle cx="18" cy="12" r="2.5"></circle>
-                        <path d="M8.2 7.2 15.8 10.8"></path>
-                        <path d="M8.2 16.8 15.8 13.2"></path>
-                    </svg>
-                    <span id="flow-title">School Leader: Story to Next MI</span>
-                    <span id="flow-stop-label" class="flow-stop-label">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                            stroke-linecap="round" stroke-linejoin="round" width="14" height="14">
-                            <polyline points="6 9 12 15 18 9"></polyline>
-                        </svg>
-                    </span>
-                    <!-- Mobile Menu Button -->
-                    <button id="mobile-menu-btn" class="mobile-menu-btn" aria-label="Toggle menu">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <line x1="3" y1="12" x2="21" y2="12"></line>
-                            <line x1="3" y1="6" x2="21" y2="6"></line>
-                            <line x1="3" y1="18" x2="21" y2="18"></line>
-                        </svg>
-                    </button>
-                </div>
-                <div id="flow-steps" class="flow-steps">
-                    <div class="flow-step active">
-                        <span class="flow-step-dot"></span>
-                        <span class="flow-step-text">
-                            <span class="flow-step-name">Mitra</span>
-                            <span class="flow-step-sublabel">Story Capture</span>
-                        </span>
-                    </div>
-                    <span class="flow-step-connector">›</span>
-                    <div class="flow-step pending">
-                        <span class="flow-step-dot empty"></span>
-                        <span class="flow-step-text">
-                            <span class="flow-step-name">Saathi</span>
-                            <span class="flow-step-sublabel">Next Micro Improvement</span>
-                        </span>
-                    </div>
-                </div>
-            </div>
+            <!-- Mobile Menu Button (Positioned absolutely) -->
+            <button id="mobile-menu-btn" class="mobile-menu-btn standalone" aria-label="Toggle menu">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="3" y1="12" x2="21" y2="12"></line>
+                    <line x1="3" y1="6" x2="21" y2="6"></line>
+                    <line x1="3" y1="18" x2="21" y2="18"></line>
+                </svg>
+            </button>
 
             <div class="chat-inner-box">
                 <div id="active-context-banner" class="active-context-banner hidden">
