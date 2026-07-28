@@ -87,7 +87,7 @@ class ConversationRepository:
                 .where(Conversation.id == id)
                 .values(
                     last_message_at=values_to_update["last_message_at"],
-                    title=func.coalesce(Conversation.title, title_from[:50])
+                    title=func.coalesce(Conversation.title, title_from)
                 )
             )
         else:

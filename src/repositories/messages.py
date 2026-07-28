@@ -116,20 +116,23 @@ class MessageRepository:
 
     def distinct_agent_sequence(self, conversation_id: uuid.UUID) -> List[uuid.UUID]:
         """
-        Returns an ordered list of distinct agent_ids that have participated in the conversation,
-        in the chronological order they first appeared. 
+        Returns an ordered list of agent_ids that have participated in the conversation,
+        collapsing only consecutive duplicates.
         Used to reconstruct the flow breadcrumbs.
         """
-        # We want the agent_ids ordered by the minimum seq where they appeared
-        from sqlalchemy import func
-        
         stmt = (
             select(ConversationMessage.agent_id)
             .where(
                 ConversationMessage.conversation_id == conversation_id,
                 ConversationMessage.agent_id.is_not(None)
             )
-            .group_by(ConversationMessage.agent_id)
-            .order_by(func.min(ConversationMessage.seq))
+            .order_by(ConversationMessage.seq.asc())
         )
-        return list(self._session.execute(stmt).scalars().all())
+        agent_ids = self._session.execute(stmt).scalars().all()
+        
+        stops = []
+        for aid in agent_ids:
+            if not stops or stops[-1] != aid:
+                stops.append(aid)
+                
+        return stops

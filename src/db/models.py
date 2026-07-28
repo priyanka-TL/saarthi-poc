@@ -88,7 +88,7 @@ class ConversationMessage(Base):
     route_confidence: Mapped[Optional[float]] = mapped_column(Numeric(4, 3), nullable=True)
 
     # interaction affordances
-    options: Mapped[Optional[List[Dict[str, Any]]]] = mapped_column(JSONB, nullable=True)
+    options: Mapped[Optional[List[Dict[str, Any]]]] = mapped_column(JSONB(none_as_null=True), nullable=True)
     selected_option_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
     # telemetry

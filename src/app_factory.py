@@ -2,8 +2,7 @@ from flask import Flask
 
 def create_app():
     # Import settings to trigger validation on startup
-    import src.settings
-    from src import settings
+    from src.settings import settings
 
     app = Flask(__name__, template_folder="../templates", static_folder="../static")
 

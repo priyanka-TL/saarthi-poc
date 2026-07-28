@@ -23,10 +23,19 @@ def before_request():
             raise Unauthorized(str(e))
 
 
+    # Open DB session
+    from src.db.engine import SessionLocal
+    g.db_session = SessionLocal()
+
+
 def after_request(response):
     """
     Echoes the request ID back in the X-Request-ID header.
+    Closes the DB session.
     """
+    if hasattr(g, 'db_session'):
+        g.db_session.close()
+
     if hasattr(g, 'request_id'):
         response.headers['X-Request-ID'] = g.request_id
     return response

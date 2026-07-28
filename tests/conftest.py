@@ -89,18 +89,13 @@ def app_module():
         "Expected exactly 4 registered agents; the characterisation fixtures "
         "encode that count."
     )
-    return app_mod
+    return app_mod.app
 
 
 @pytest.fixture()
-def flask_app(app_module):
-    app_module.app.config.update(TESTING=True)
-    return app_module.app
-
-
-@pytest.fixture()
-def client(flask_app):
-    return flask_app.test_client()
+def client(app_module):
+    """A test client for the Flask application."""
+    return app_module.test_client()
 
 
 @pytest.fixture()
@@ -113,10 +108,8 @@ def script():
 
 @pytest.fixture(autouse=True)
 def reset_globals(request):
-    """Reset the module-global conversation state around every test.
-
-    ``chat_history``, ``flow_stops`` and ``flow_title`` (``app.py:30-35``) are
-    process globals shared by every request, so without this fixture test
+    """
+    Process globals are shared by every request, so without this fixture test
     *order* changes test *results*.
 
     Deliberately calls the application's own ``_reset_flow()`` rather than
