@@ -35,7 +35,7 @@ jobs:
         
     - name: Run Database Migrations
       env:
-        DATABASE_URL: postgresql://postgres@127.0.0.1:5433/postgres
+        DATABASE_URL: postgresql://postgres@127.0.0.1:5432/postgres
       run: |
         make migrate
         alembic check
