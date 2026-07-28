@@ -8,12 +8,12 @@ This is a production-style, modular example of a multi-agent routing system in P
 3. **Direct Agent Communication**: The modern web interface allows you to select a specific agent from the sidebar and speak with them directly, bypassing the orchestrator altogether.
 4. **Interactive UI with Theming**: Includes a polished, dynamic frontend with smooth micro-animations and a built-in Dark/Light mode toggle that saves to your local storage.
 5. **Modular Architecture**: Code is split into specialized modules (`config`, `logger`, `llm`, `agents`) for easier maintenance and scalability.
-6. **Environment Configuration**: Uses `python-dotenv` for managing API keys securely (supports OpenRouter and Groq).
+6. **LiteLLM + OpenRouter**: All LLM calls go through [LiteLLM](https://www.litellm.ai/) as a single provider-agnostic abstraction layer, configured to route to [OpenRouter](https://openrouter.ai/). The model is fully configurable via environment variables, with built-in retries, request timeouts, and logging.
 
 ## Project Structure
-- `src/config.py`: Loads environment variables.
+- `src/config.py`: Loads environment variables (OpenRouter API key, model, timeout, retries).
 - `src/logger.py`: Centralized logging configuration.
-- `src/llm.py`: A LangChain factory that configures and returns `ChatOpenAI` instances pointing to OpenRouter.
+- `src/llm.py`: A LangChain factory that configures and returns `ChatLiteLLM` instances, routed through LiteLLM to OpenRouter.
 - `src/agents/`:
   - `base.py`: The abstract base class that manages the core LangChain pipeline execution.
   - `specialized.py`: The implementations of specific sub-agents (Health, Technical, General).
@@ -26,7 +26,8 @@ This is a production-style, modular example of a multi-agent routing system in P
 - `requests`
 - `python-dotenv`
 - `flask`
-- `langchain`, `langchain-openai`, `langchain-core`
+- `langchain`, `langchain-core`, `langchain-community`
+- `litellm`, `langchain-litellm`
 
 ## Setup and Usage
 
@@ -43,11 +44,20 @@ This is a production-style, modular example of a multi-agent routing system in P
    ```
 
 3. **Configure Environment**:
-   Create your `.env` file and add your [OpenRouter](https://openrouter.ai/) API key.
+   Create your `.env` file and add your [OpenRouter](https://openrouter.ai/keys) API key.
    ```bash
    cp .env.example .env
    # Edit .env and set OPENROUTER_API_KEY
    ```
+
+   Environment variables:
+   | Variable | Required | Default | Description |
+   |---|---|---|---|
+   | `OPENROUTER_API_KEY` | Yes | — | Your OpenRouter API key. The app fails fast at startup if this is missing. |
+   | `OPENROUTER_MODEL` | No | `qwen/qwen3.7-flash` | Any model id available on [OpenRouter](https://openrouter.ai/models). Passed to LiteLLM as `openrouter/<model>`. |
+   | `LLM_TIMEOUT` | No | `30` | Per-request timeout (seconds) applied by LiteLLM to every LLM call. |
+   | `LLM_MAX_RETRIES` | No | `3` | Retry count applied by LiteLLM on transient LLM call failures. |
+   | `LOG_LEVEL` | No | `INFO` | Logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`). |
 
 4. **Run the application**:
    Ensure you are still inside the virtual environment (`source .venv/bin/activate`), and then run:

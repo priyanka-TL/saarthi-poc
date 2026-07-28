@@ -5,33 +5,30 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Config:
-    # Choose provider: "groq" or "openrouter"
-    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "groq").lower()
-    
-    # Groq Settings
-    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
-    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-    
-    # OpenRouter Settings
+    # ------------------------------------------------------------
+    # LLM Settings (LiteLLM -> OpenRouter)
+    # ------------------------------------------------------------
+    # All LLM calls go through LiteLLM, routed to OpenRouter.
     OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
-    OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.2-3b-instruct:free")
-    
+
+    # Configurable model id (LiteLLM/OpenRouter naming, e.g. "qwen/qwen3.7-flash").
+    OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "qwen/qwen3.7-flash")
+
+    # Request timeout (seconds) and retry count applied to every LLM call.
+    LLM_TIMEOUT: float = float(os.getenv("LLM_TIMEOUT", "30"))
+    LLM_MAX_RETRIES: int = int(os.getenv("LLM_MAX_RETRIES", "3"))
+
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 
     @classmethod
     def validate(cls):
         """
-        Ensure critical configuration is set based on the selected provider.
+        Ensure critical configuration is set before the app starts.
         """
-        if cls.LLM_PROVIDER == "groq" and not cls.GROQ_API_KEY:
+        if not cls.OPENROUTER_API_KEY:
             raise ValueError(
-                "LLM_PROVIDER is set to 'groq' but GROQ_API_KEY is missing. "
-                "Please set it in your .env file."
-            )
-        elif cls.LLM_PROVIDER == "openrouter" and not cls.OPENROUTER_API_KEY:
-            raise ValueError(
-                "LLM_PROVIDER is set to 'openrouter' but OPENROUTER_API_KEY is missing. "
-                "Please set it in your .env file."
+                "OPENROUTER_API_KEY is missing. "
+                "Please set it in your .env file (see .env.example)."
             )
 
 config = Config()

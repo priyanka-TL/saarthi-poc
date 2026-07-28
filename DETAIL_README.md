@@ -13,9 +13,29 @@ Instead of relying on a single, monolithic AI model to handle every user request
 ### Core Technologies Used
 *   **Flask:** Provides the backend web server and API endpoints.
 *   **LangChain & LCEL (LangChain Expression Language):** The core framework used to build prompt templates, manage LLM interactions, and construct the agent pipelines.
-*   **OpenRouter / Groq (via `langchain-openai`):** The LLM provider powering the intelligence behind the orchestrator and the sub-agents.
+*   **LiteLLM (via `langchain-litellm`'s `ChatLiteLLM`), routed to OpenRouter:** LiteLLM is the single LLM abstraction layer for the whole project. `src/llm.py` is the only place that constructs an LLM client; every agent (orchestrator and sub-agents) receives that same `ChatLiteLLM` instance and never talks to a provider SDK directly. The target model is configurable via the `OPENROUTER_MODEL` environment variable (default `qwen/qwen3.7-flash`), and LiteLLM applies request timeouts and retries (`LLM_TIMEOUT`, `LLM_MAX_RETRIES`) uniformly to every call.
 *   **DuckDuckGo Search (`ddgs`):** Used as external tools by the Research Agent to perform live web and YouTube searches.
 *   **Vanilla JS/HTML/CSS:** For a dynamic frontend UI with theming (Light/Dark mode) and direct agent communication capabilities.
+
+### LLM Provider Layer (`src/llm.py`)
+
+All LLM instantiation is centralized in a single factory function, `get_llm()`:
+
+```python
+def get_llm(temperature: float = 0.0) -> ChatLiteLLM:
+    model = f"openrouter/{config.OPENROUTER_MODEL}"
+    return ChatLiteLLM(
+        model=model,
+        api_key=config.OPENROUTER_API_KEY,
+        temperature=temperature,
+        request_timeout=config.LLM_TIMEOUT,
+        max_retries=config.LLM_MAX_RETRIES,
+    )
+```
+
+Because `ChatLiteLLM` implements LangChain's standard `BaseChatModel` interface (`.invoke()`, `.bind_tools()`, and LCEL's `prompt | llm | parser` composition), swapping the provider layer required **zero changes** to `src/agents/base.py`, `orchestrator.py`, or `specialized.py` — those modules only ever depended on `get_llm()` returning a LangChain-compatible chat model, not on any provider-specific class. This is also why the model is fully configurable: any OpenRouter model id can be dropped into `OPENROUTER_MODEL` without touching application code.
+
+Error handling stays layered as before: LiteLLM handles low-level retries and timeouts on each call, while the existing `try/except` blocks in `orchestrator.py` (falls back to the default agent) and `base.py` (returns a friendly error message) handle failures at the application level — unchanged by this migration.
 
 ---
 

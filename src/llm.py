@@ -1,35 +1,63 @@
-from langchain_openai import ChatOpenAI
+from typing import Any, List, Optional
+
+from langchain_core.callbacks import CallbackManagerForLLMRun
+from langchain_core.messages import BaseMessage
+from langchain_core.outputs import ChatResult
+from langchain_litellm import ChatLiteLLM
+
 from src.config import config
 from src.logger import get_logger
 
 logger = get_logger("llm_client")
 
-def get_llm(temperature: float = 0.0) -> ChatOpenAI:
+
+class _NormalizedChatLiteLLM(ChatLiteLLM):
     """
-    Returns a configured LangChain Chat model (ChatOpenAI)
-    pointing to OpenRouter or Groq via OpenAI compatibility.
+    ChatLiteLLM, with message content normalized to a plain string.
+
+    Reasoning-capable models (e.g. Qwen3) return `AIMessage.content` as a
+    list of content blocks (thinking/reasoning + text) instead of a plain
+    string. The rest of the app (agents, JSON API, frontend markdown
+    rendering) expects `.content` to be a string, exactly as it was with the
+    previous provider. Normalizing here -- in the provider layer -- keeps
+    that contract intact without touching any agent/application logic.
     """
-    # Check which provider is configured in our .env file
-    provider = config.LLM_PROVIDER
-    
-    # Configure the base URL and API key based on the provider
-    if provider == "groq":
-        # Groq provides lightning-fast inference for open-source models
-        base_url = "https://api.groq.com/openai/v1"
-        api_key = config.GROQ_API_KEY
-        model = config.GROQ_MODEL
-    else:
-        # OpenRouter provides access to hundreds of models (including free ones)
-        base_url = "https://openrouter.ai/api/v1"
-        api_key = config.OPENROUTER_API_KEY
-        model = config.OPENROUTER_MODEL
-        
-    # We use LangChain's ChatOpenAI class because both Groq and OpenRouter 
-    # support the standard OpenAI API format (Chat Completions API).
-    return ChatOpenAI(
+
+    def _generate(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        stream: Optional[bool] = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        result = super()._generate(messages, stop=stop, run_manager=run_manager, stream=stream, **kwargs)
+        for generation in result.generations:
+            if isinstance(generation.message.content, list):
+                generation.message.content = generation.message.text
+        return result
+
+
+def get_llm(temperature: float = 0.0) -> ChatLiteLLM:
+    """
+    Returns a LangChain-compatible chat model backed by LiteLLM, routed to
+    OpenRouter. LiteLLM is the single abstraction layer for all LLM calls in
+    this project -- provider/model selection, retries, and timeouts are all
+    driven by configuration here rather than scattered across call sites.
+    """
+    # LiteLLM routes requests based on the "<provider>/<model>" prefix.
+    model = f"openrouter/{config.OPENROUTER_MODEL}"
+
+    logger.info(
+        f"Initializing LLM via LiteLLM -> OpenRouter | model='{model}' "
+        f"temperature={temperature} timeout={config.LLM_TIMEOUT}s "
+        f"max_retries={config.LLM_MAX_RETRIES}"
+    )
+
+    return _NormalizedChatLiteLLM(
         model=model,
+        api_key=config.OPENROUTER_API_KEY,
         temperature=temperature,
-        openai_api_key=api_key,
-        openai_api_base=base_url,
-        max_retries=3
+        request_timeout=config.LLM_TIMEOUT,
+        max_retries=config.LLM_MAX_RETRIES,
     )
