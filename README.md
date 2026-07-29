@@ -29,22 +29,46 @@ This is a production-style, modular example of a multi-agent routing system in P
 - `langchain`, `langchain-core`, `langchain-community`
 - `litellm`, `langchain-litellm`
 
-## Setup and Usage
+## Setup and Usage (Mac)
 
-1. **Set up a Virtual Environment**:
+This project requires **uv** (for fast Python package management) and **Docker** (for the PostgreSQL database).
+
+1. **Install Prerequisites**:
+   Ensure you have Homebrew installed, then install Python, `uv`, and Docker (if not already installed):
    ```bash
-   python3 -m venv .venv
+   brew install python@3.13
+   brew install uv
+   # Install Docker Desktop if you don't have it:
+   # brew install --cask docker
+   ```
+
+2. **Set up the Environment**:
+   Clone the repository and create a virtual environment using `uv`:
+   ```bash
+   uv venv
    source .venv/bin/activate
    ```
 
-2. **Install Dependencies**:
-   Ensure your virtual environment is active, then run:
+3. **Install Dependencies**:
+   Use the included Makefile to install dependencies quickly via `uv`:
    ```bash
-   pip install -r requirements.txt
+   make install
    ```
 
-3. **Configure Environment**:
-   Create your `.env` file and add your [OpenRouter](https://openrouter.ai/keys) API key.
+4. **Start the Database**:
+   The application requires a PostgreSQL database. Start it using Docker Compose:
+   ```bash
+   docker compose up -d
+   ```
+
+5. **Run Database Migrations**:
+   Initialize the database schema by running the Alembic migrations:
+   ```bash
+   make migrate
+   ```
+
+6. **Configure Environment**:
+   Create your `.env` file from the example and add your [OpenRouter](https://openrouter.ai/keys) API key.
    ```bash
    cp .env.example .env
    # Edit .env and set OPENROUTER_API_KEY
@@ -58,11 +82,12 @@ This is a production-style, modular example of a multi-agent routing system in P
    | `LLM_TIMEOUT` | No | `30` | Per-request timeout (seconds) applied by LiteLLM to every LLM call. |
    | `LLM_MAX_RETRIES` | No | `3` | Retry count applied by LiteLLM on transient LLM call failures. |
    | `LOG_LEVEL` | No | `INFO` | Logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`). |
+   | `SAARTHI_ADMIN_ENABLED` | No | `0` | Set to `1` to enable administrative API endpoints. |
 
-4. **Run the application**:
-   Ensure you are still inside the virtual environment (`source .venv/bin/activate`), and then run:
+7. **Run the application**:
+   Start the local Flask development server:
    ```bash
-   flask run
+   make run
    ```
    
    The web application will be available at `http://127.0.0.1:5000/`.

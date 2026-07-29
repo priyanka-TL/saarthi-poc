@@ -1,6 +1,9 @@
-.PHONY: install run test migrate migrate-down db-shell lint
+.PHONY: install run test migrate migrate-down db-shell lint venv
 
-install:
+venv:
+	uv venv --python 3.10
+
+install: venv
 	uv pip install -r requirements.txt
 
 run:

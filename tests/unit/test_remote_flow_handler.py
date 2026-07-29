@@ -309,7 +309,16 @@ def test_no_history_is_ever_sent():
 # ---------------------------------------------------------------------------
 
 
-def test_completed_session_returns_terminal_and_finalizing_state():
+def test_completed_session_returns_terminal_true_and_awaiting_user_state():
+    """The handler must NEVER put state=finalizing in its own delta -- that
+    transition belongs exclusively to OrchestrationService._finalize's own
+    claim_finalizing() call (design doc §4.7's idempotency guard, whose
+    claimable set is only {in_progress, awaiting_user}). If the delta here
+    set finalizing itself, orchestration.py's step 11 would apply that
+    BEFORE calling _finalize(), so the claim would find the session already
+    in 'finalizing' and fail -- wedging it there forever, since nothing
+    ever revisits it. terminal=True alone is the correct, sufficient signal
+    for OrchestrationService to call _finalize() next."""
     rest = _FakeRestClient()
     rest._completed = True
     channel = _FakeChannel([BotTurn(text="Thank you!", options=[], step=14)])
@@ -320,7 +329,7 @@ def test_completed_session_returns_terminal_and_finalizing_state():
     turn = handler.handle(ctx)
 
     assert turn.terminal is True
-    assert turn.session_delta.state == SessionState.finalizing
+    assert turn.session_delta.state == SessionState.awaiting_user
 
 
 def test_incomplete_session_returns_not_terminal_and_awaiting_user():

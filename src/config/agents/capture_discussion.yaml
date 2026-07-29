@@ -1,0 +1,21 @@
+schema_version: 1
+key: capture_discussion
+name: "Capture Discussion"
+description: >-
+  Guided interview that distils the important points from a community discussion.
+  Use when the user wants to record, summarise or capture a meeting or group conversation.
+agent_type: remote_flow
+sort_order: 15
+capabilities: [guided_interview, discussion_capture, multilingual]
+remote:
+  provider: mitra
+  flow_name: guest-discussion
+  bot_route_env: MITRA_DISCUSSION_BOT_ROUTE
+  company_env: MITRA_COMPANY
+routing:
+  keywords: ["capture discussion", "record discussion", "meeting notes", "community discussion"]
+  priority: 88
+  pin_session: true
+  exit_keywords: ["/exit", "cancel", "stop"]
+memory: { strategy: none }
+features: { emit_options: true }

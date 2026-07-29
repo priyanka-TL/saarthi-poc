@@ -99,7 +99,20 @@ class RemoteFlowAgentHandler:
             text=bot.text,
             options=[Option(o.id, o.label, o.value) for o in bot.options],
             session_delta=SessionDelta(
-                state=SessionState.finalizing if done else SessionState.awaiting_user,
+                # ALWAYS awaiting_user here, even when done=True. The
+                # in_progress/awaiting_user -> finalizing transition belongs
+                # exclusively to OrchestrationService._finalize's own
+                # claim_finalizing() call (design doc §4.7's idempotency
+                # guard). If this delta set state=finalizing itself, step 11
+                # in handle_turn() would apply that BEFORE _finalize() runs,
+                # so claim_finalizing() -- whose claimable set is only
+                # {in_progress, awaiting_user} -- would find the session
+                # already in 'finalizing' and fail to claim it. The session
+                # would then be stuck in 'finalizing' forever: no code path
+                # ever revisits it, and Mitra's real end-story call never
+                # fires. `terminal=done` below is the only signal
+                # OrchestrationService needs to call _finalize() next.
+                state=SessionState.awaiting_user,
                 remote_session_id=sess.remote_session_id,
                 remote_profile_id=sess.remote_profile_id,
                 step=bot.step,

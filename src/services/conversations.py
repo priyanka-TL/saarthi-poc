@@ -7,7 +7,7 @@ from sqlalchemy import text
 from src.repositories.conversations import ConversationRepository
 from src.repositories.messages import MessageRepository
 from src.domain.core import UserContext, MemorySpec
-from src.domain.conversations import ConversationDTO
+from src.domain.conversations import ConversationDTO, ConversationPageDTO
 
 
 class ConversationService:

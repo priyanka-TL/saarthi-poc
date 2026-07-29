@@ -16,8 +16,23 @@ from src.repositories.sessions import AgentSessionRepository
 # that doesn't change state is a field-only update -- e.g. bumping step/
 # turn_count while remaining in 'awaiting_user'); terminal states accept no
 # apply() call at all, including a same-state one, since they're final.
+#
+# 'pending' additionally allows 'awaiting_user'/'finalizing' directly:
+# RemoteFlowAgentHandler.handle() (src/agents/remote_flow_handler.py) is one
+# synchronous call that does profile+session creation, the WS handshake, AND
+# the first turn, then returns a single delta reporting the outcome -- per
+# the design doc's own §8.3 sequence diagram, the first turn's real state
+# path is pending -> authenticating -> awaiting_user, with 'in_progress'
+# never actually set on turn 1 (it's only meaningful as "a turn is in
+# flight" on a RETURNING turn, i.e. awaiting_user -> in_progress ->
+# awaiting_user -- and that same-state round trip already works today via
+# the existing awaiting_user -> awaiting_user entry below, since the handler
+# only reports the post-turn outcome, never the momentary in-flight state).
+# Without this, a session's very first turn -- or one that completes the
+# interview in a single turn -- raises InvalidTransitionError before the
+# reply is ever persisted.
 ALLOWED = {
-    "pending": {"pending", "authenticating", "failed"},
+    "pending": {"pending", "authenticating", "awaiting_user", "finalizing", "failed"},
     "authenticating": {"authenticating", "in_progress", "failed"},
     "in_progress": {"in_progress", "awaiting_user", "finalizing", "failed"},
     "awaiting_user": {"awaiting_user", "in_progress", "finalizing", "abandoned"},

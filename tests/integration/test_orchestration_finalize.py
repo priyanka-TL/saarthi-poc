@@ -95,6 +95,11 @@ def _new_conversation(session, user=None) -> uuid.UUID:
 class _Agent:
     id: uuid.UUID
     spec: RemoteFlowAgentSpec
+    checksum: str = "test-checksum"
+
+    @property
+    def key(self) -> str:
+        return self.spec.key
 
 
 def _remote_agent(agent_id: uuid.UUID) -> _Agent:
@@ -305,5 +310,113 @@ def test_losing_claim_returns_cached_state_without_calling_finalize():
             "SELECT count(*) FROM audit_logs WHERE entity_id = :id"
         ), {"id": sess_view.id}).scalar()
         assert audit_rows == 0
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
+# Regression: a real bug found in production -- a handler returning
+# terminal=True with state=finalizing IN ITS OWN DELTA (rather than leaving
+# the delta at awaiting_user and letting terminal=True alone drive
+# _finalize()) wedges the session in 'finalizing' forever. handle_turn()'s
+# own step 11 applies the handler's delta BEFORE calling _finalize(), so
+# claim_finalizing() -- claimable only from {in_progress, awaiting_user} --
+# finds the session already 'finalizing' and can never claim it. Every test
+# above calls orch._finalize() directly, bypassing handle_turn() entirely,
+# so none of them exercise the interaction between step 11's apply() and
+# _finalize() at all.
+#
+# This test alone does NOT catch a regression of the original bug -- it uses
+# a fake handler that always emits the correct contract, so it only proves
+# handle_turn() correctly drives a well-behaved handler's delta through to
+# 'completed'. The other half -- proving RemoteFlowAgentHandler itself emits
+# that correct contract -- is
+# tests/unit/test_remote_flow_handler.py::test_completed_session_returns_terminal_true_and_awaiting_user_state.
+# The two together are what would have caught this before it shipped.
+# ---------------------------------------------------------------------------
+
+
+class _FakeTerminalHandler:
+    """A handler that DOES follow the correct contract: terminal=True with
+    session_delta.state left at awaiting_user. This is what
+    RemoteFlowAgentHandler.handle() must produce (design doc §4.7)."""
+    def handle(self, ctx):
+        from src.agents.protocol import AgentTurn
+        return AgentTurn(
+            text="Thank you, your story is complete.",
+            terminal=True,
+            session_delta=SessionDelta(state=SessionState.awaiting_user, step=99),
+        )
+
+
+class _FakeHandlerFactory:
+    def __init__(self, handler):
+        self._handler = handler
+
+    def build(self, spec, checksum):
+        return self._handler
+
+
+class _FakeRouter:
+    def __init__(self, agent):
+        self._agent = agent
+
+    def select(self, conv, ctx, explicit_key=None):
+        from src.services.router_service import RouteDecision
+        return RouteDecision(agent=self._agent, reason="pinned", confidence=1.0, router_latency_ms=0)
+
+
+class _FakeRegistry:
+    """handle_turn() calls registry.default() unconditionally while building
+    router history context, even though this test's router never needs it."""
+    def default(self):
+        return None
+
+
+def test_handle_turn_with_terminal_delta_actually_reaches_completed():
+    """The concrete end-to-end regression test for the bug described above."""
+    session = SessionLocal()
+    try:
+        agent_id = _insert_agent_row(session, f"agent_{uuid.uuid4().hex[:8]}")
+        user = _new_user(token="the-real-token")
+        conv_id = _new_conversation(session, user=user)
+        conv_repo = ConversationRepository(session)
+        conv_repo.pin(conv_id, agent_id)
+
+        sess_view = _session_ready_for_finalizing(session, conv_id, agent_id)
+        session.commit()
+
+        call_order: List[str] = []
+        rest = _FakeMitraRest(call_order)
+        pool = _FakeMitraSessions(call_order)
+        agent = _remote_agent(agent_id)
+
+        orch = OrchestrationService(
+            session=session,
+            registry=_FakeRegistry(),
+            handler_factory=_FakeHandlerFactory(_FakeTerminalHandler()),
+            llm_factory=None,
+            router_service=_FakeRouter(agent),
+            mitra_rest=rest,
+            mitra_sessions=pool,
+        )
+
+        from src.services.orchestration import TurnInput
+        ctx_in = TurnInput(
+            request_id="req-1", conversation_id=conv_id, user=user, text="last answer",
+        )
+        result = orch.handle_turn(ctx_in)
+        session.commit()
+
+        assert result.session is not None
+        assert result.session.state == "completed", (
+            "a handler reporting terminal=True must actually reach 'completed', "
+            "not get stuck in 'finalizing'"
+        )
+        assert result.session.result_ref == "9931"
+        assert len(rest.finalize_calls) == 1
+
+        fresh = AgentSessionRepository(session).get(sess_view.id)
+        assert fresh.state == "completed"
     finally:
         session.close()

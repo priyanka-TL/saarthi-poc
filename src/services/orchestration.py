@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Any
 
 from src.agents.protocol import TurnContext, AgentSessionView, Option, SessionDelta, SessionState
+from src.domain.sessions import AgentSessionDTO
 from src.repositories.audit import AuditLogRepository
 from src.repositories.conversations import ConversationRepository
 from src.repositories.messages import MessageRepository
@@ -16,6 +17,34 @@ from src.agents.factory import HandlerFactory
 from src.logger import get_logger
 
 logger = get_logger("orchestration")
+
+
+def _to_session_view(dto: AgentSessionDTO) -> AgentSessionView:
+    """AgentSessionDTO (src.domain.sessions) is the persisted-row Pydantic
+    model SessionService deals in; AgentSessionView (src.agents.protocol) is
+    the narrower, handler-facing dataclass every AgentHandler is written
+    against -- RemoteFlowAgentHandler in particular calls dataclasses.replace()
+    on ctx.session, which raises on a Pydantic instance. TurnContext.session
+    must always be the latter, never the DTO directly."""
+    return AgentSessionView(
+        id=dto.id,
+        conversation_id=dto.conversation_id,
+        agent_id=dto.agent_id,
+        state=SessionState(dto.state),
+        remote_provider=dto.remote_provider,
+        remote_session_id=dto.remote_session_id,
+        remote_profile_id=dto.remote_profile_id,
+        remote_flow=dto.remote_flow,
+        remote_bot_route=dto.remote_bot_route,
+        language=dto.language,
+        step=dto.step,
+        turn_count=dto.turn_count,
+        result_ref=dto.result_ref,
+        report_url=dto.report_url,
+        error=dto.error,
+        error_code=dto.error_code,
+        state_data=dto.state_data,
+    )
 
 @dataclass
 class TurnInput:
@@ -135,7 +164,7 @@ class OrchestrationService:
             text=ctx_in.text,
             option_id=ctx_in.option_id,
             history=history,
-            session=session_view,
+            session=_to_session_view(session_view) if session_view else None,
             locale=locale
         )
         
