@@ -29,6 +29,7 @@ from src.integrations.mitra.exceptions import (
     MitraChannelClosed,
     MitraRemoteError,
     MitraTurnTimeout,
+    MitraConcurrentTurnError,
 )
 from src.integrations.mitra.frame_parser import Frame, ParsedOption, parse
 from src.logger import get_logger
@@ -56,6 +57,7 @@ class MitraChannel:
         self._pending: Optional[Frame] = None  # settling pushback slot, §7.3
         self._closed = threading.Event()
         self._close_reason = ""
+        self._turn_lock = threading.Lock()
 
         self._ws = ws_factory()
         self._ws.connect(
@@ -168,47 +170,52 @@ class MitraChannel:
     # ------------------------------------------------------------------
 
     def send_and_await_turn(self, text: str, timeout_s: float, idle_gap_s: float) -> BotTurn:
-        self._drain_stale()  # leftover echoes, §1.2
+        if not self._turn_lock.acquire(blocking=False):
+            raise MitraConcurrentTurnError()
+        try:
+            self._drain_stale()  # leftover echoes, §1.2
 
-        self._ws.send(json.dumps({"type": "message", "text": text, "context": "", "asr_audio": None}))
+            self._ws.send(json.dumps({"type": "message", "text": text, "context": "", "asr_audio": None}))
 
-        chunks: List[str] = []
-        options: List[ParsedOption] = []
-        step: Optional[int] = None
-        deadline = time.monotonic() + timeout_s
-        last_rx = time.monotonic()
-
-        while True:
-            if self._closed.is_set():
-                raise MitraChannelClosed(self._close_reason)
-
-            remaining = min(deadline - time.monotonic(), last_rx + idle_gap_s - time.monotonic())
-            if remaining <= 0:
-                if chunks:
-                    break  # idle-gap (or timeout) flush
-                raise MitraTurnTimeout(step=step)
-
-            f = self._try_get(timeout=remaining)
-            if f is None:
-                continue
-            if f.source == "user":
-                continue  # §1.2 ECHO -- DISCARD
-            if f.source == "system" and f.error:
-                raise MitraRemoteError(f.msg or f.error)
-            if f.source != "bot":
-                continue
-
+            chunks: List[str] = []
+            options: List[ParsedOption] = []
+            step: Optional[int] = None
+            deadline = time.monotonic() + timeout_s
             last_rx = time.monotonic()
-            if f.msg:
-                chunks.append(f.msg)  # §1.3 ACCUMULATE
-            if f.step is not None:
-                step = f.step
-            if f.options:
-                options = f.options
-            if f.finish_reason:
-                break  # §1.3 END OF TURN
 
-        return BotTurn(text="".join(chunks), options=options, step=step)
+            while True:
+                if self._closed.is_set():
+                    raise MitraChannelClosed(self._close_reason)
+
+                remaining = min(deadline - time.monotonic(), last_rx + idle_gap_s - time.monotonic())
+                if remaining <= 0:
+                    if chunks:
+                        break  # idle-gap (or timeout) flush
+                    raise MitraTurnTimeout(step=step)
+
+                f = self._try_get(timeout=remaining)
+                if f is None:
+                    continue
+                if f.source == "user":
+                    continue  # §1.2 ECHO -- DISCARD
+                if f.source == "system" and f.error:
+                    raise MitraRemoteError(f.msg or f.error)
+                if f.source != "bot":
+                    continue
+
+                last_rx = time.monotonic()
+                if f.msg:
+                    chunks.append(f.msg)  # §1.3 ACCUMULATE
+                if f.step is not None:
+                    step = f.step
+                if f.options:
+                    options = f.options
+                if f.finish_reason:
+                    break  # §1.3 END OF TURN
+
+            return BotTurn(text="".join(chunks), options=options, step=step)
+        finally:
+            self._turn_lock.release()
 
     # ------------------------------------------------------------------
     # Lifecycle

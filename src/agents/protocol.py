@@ -74,6 +74,8 @@ class SessionDelta:
     state: SessionState
     remote_session_id: Optional[str] = None
     remote_profile_id: Optional[str] = None
+    remote_flow: Optional[str] = None
+    remote_bot_route: Optional[str] = None
     step: Optional[int] = None
     result_ref: Optional[str] = None
     report_url: Optional[str] = None

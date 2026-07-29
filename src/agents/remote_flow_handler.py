@@ -115,6 +115,8 @@ class RemoteFlowAgentHandler:
                 state=SessionState.awaiting_user,
                 remote_session_id=sess.remote_session_id,
                 remote_profile_id=sess.remote_profile_id,
+                remote_flow=self._remote.flow_name,
+                remote_bot_route=bot_route,
                 step=bot.step,
             ),
             latency_ms=int((time.monotonic() - t0) * 1000),

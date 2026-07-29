@@ -72,3 +72,11 @@ class MitraRemoteError(MitraError):
 
     def __init__(self, msg: str) -> None:
         super().__init__(msg)
+
+
+class MitraConcurrentTurnError(MitraError):
+    """Raised when a concurrent request attempts to use a MitraChannel that
+    is already executing a turn."""
+
+    def __init__(self) -> None:
+        super().__init__("A turn is already in progress for this conversation.")

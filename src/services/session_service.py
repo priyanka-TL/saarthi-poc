@@ -105,6 +105,10 @@ class SessionService:
             fields["remote_session_id"] = delta.remote_session_id
         if delta.remote_profile_id is not None:
             fields["remote_profile_id"] = delta.remote_profile_id
+        if delta.remote_flow is not None:
+            fields["remote_flow"] = delta.remote_flow
+        if delta.remote_bot_route is not None:
+            fields["remote_bot_route"] = delta.remote_bot_route
         if delta.step is not None:
             fields["step"] = delta.step
         if delta.result_ref is not None:

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from flask import g, jsonify
 
-from src.integrations.mitra.exceptions import MitraError, MitraTurnTimeout
+from src.integrations.mitra.exceptions import MitraError, MitraTurnTimeout, MitraConcurrentTurnError
 
 
 def error_response(message: str, code: str, status: int):
@@ -22,8 +22,10 @@ def error_response(message: str, code: str, status: int):
 
 def mitra_error_response(exc: MitraError):
     """504 UPSTREAM_TIMEOUT for a turn timeout -- the session survives, a
-    retry is safe. Every other Mitra-side failure collapses to 502
-    UPSTREAM_UNAVAILABLE."""
+    retry is safe. 429 CONCURRENT_TURN_REJECTED for duplicate requests. 
+    Every other Mitra-side failure collapses to 502 UPSTREAM_UNAVAILABLE."""
     if isinstance(exc, MitraTurnTimeout):
         return error_response(str(exc), "UPSTREAM_TIMEOUT", 504)
+    if isinstance(exc, MitraConcurrentTurnError):
+        return error_response(str(exc), "CONCURRENT_TURN_REJECTED", 429)
     return error_response(str(exc), "UPSTREAM_UNAVAILABLE", 502)
