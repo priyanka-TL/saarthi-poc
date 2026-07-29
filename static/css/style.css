@@ -1080,6 +1080,15 @@ body {
     border-style: dashed;
 }
 
+/* The historically-chosen option in a replayed (readOnly) option group --
+   stands out from the other, unselected, faded choices. */
+.option-btn--selected {
+    opacity: 0.85;
+    border-style: solid;
+    border-color: var(--primary-color);
+    color: var(--primary-color);
+}
+
 /* Session finalizing spinner (§10.3 change 5) */
 .session-notice {
     font-style: italic;

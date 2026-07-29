@@ -1,5 +1,5 @@
 import uuid
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Set
 
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -7,7 +7,7 @@ from sqlalchemy import text
 from src.repositories.conversations import ConversationRepository
 from src.repositories.messages import MessageRepository
 from src.domain.core import UserContext, MemorySpec
-from src.domain.conversations import ConversationDTO, ConversationPageDTO
+from src.domain.conversations import ConversationDTO, ConversationPageDTO, MessageDTO
 
 
 class ConversationService:
@@ -29,32 +29,36 @@ class ConversationService:
         msgs = self._msg_repo.recent(conversation_id, memory_spec)
         return [{"role": m.role, "content": m.content} for m in msgs]
 
+    def resolve_agent_names(self, agent_ids: Set[uuid.UUID]) -> Dict[uuid.UUID, str]:
+        """
+        Batch-resolves agent ids to their current display name, straight from
+        the `agents` table (not the registry, which only holds enabled
+        agents -- historical messages must still show the name of an agent
+        that's since been disabled).
+        """
+        if not agent_ids:
+            return {}
+        ids = list(agent_ids)
+        placeholders = ", ".join(f":id{i}" for i in range(len(ids)))
+        params = {f"id{i}": aid for i, aid in enumerate(ids)}
+        q = text(f"SELECT id, name FROM agents WHERE id IN ({placeholders})")
+        return {row.id: row.name for row in self._session.execute(q, params).fetchall()}
+
     def flow_payload(self, conversation_id: uuid.UUID) -> Dict[str, Any]:
         """
         Reproduces the legacy module-global flow_payload exactly.
         """
         stmt = self._session.execute(
-            text("SELECT title FROM conversations WHERE id = :id"), 
+            text("SELECT title FROM conversations WHERE id = :id"),
             {"id": conversation_id}
         )
         row = stmt.fetchone()
         title = row[0] if row else None
-        
+
         agent_ids = self._msg_repo.distinct_agent_sequence(conversation_id)
-        
-        stops = []
-        if agent_ids:
-            # Fetch names in one query
-            placeholders = ", ".join(f":id{i}" for i in range(len(agent_ids)))
-            params = {f"id{i}": aid for i, aid in enumerate(agent_ids)}
-            
-            q = text(f"SELECT id, name FROM agents WHERE id IN ({placeholders})")
-            agent_names = {row.id: row.name for row in self._session.execute(q, params).fetchall()}
-            
-            for aid in agent_ids:
-                if aid in agent_names:
-                    stops.append(agent_names[aid])
-                
+        agent_names = self.resolve_agent_names(set(agent_ids))
+        stops = [agent_names[aid] for aid in agent_ids if aid in agent_names]
+
         return {
             "title": title,
             "stops": stops,
@@ -66,6 +70,15 @@ class ConversationService:
         Returns the user's most recently active conversations, newest first.
         """
         return self._conv_repo.list_for_user(user, cursor=None, limit=limit)
+
+    def list_messages(self, conversation_id: uuid.UUID) -> List[MessageDTO]:
+        """
+        Returns the full message history for a conversation, chronological
+        (seq ASC). A single generous page -- no pagination UI exists to drive
+        keyset paging further, and 500 messages is far beyond any realistic
+        POC conversation.
+        """
+        return self._msg_repo.list_page(conversation_id, after_seq=0, limit=500).messages
 
     def reset(self, conversation_id: uuid.UUID) -> None:
         """

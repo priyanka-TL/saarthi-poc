@@ -2,6 +2,7 @@ from flask import Blueprint, render_template, request, jsonify, current_app, g
 import uuid
 from src.services.conversations import ConversationService
 from src.services.session_service import SessionService
+from src.repositories.conversations import ConversationRepository
 from src.domain.core import MemorySpec
 from src.settings import settings
 from src.api.errors import error_response, mitra_error_response
@@ -108,6 +109,34 @@ def list_conversations():
             }
             for c in page.conversations
         ]
+    })
+
+@chat_bp.route("/api/conversations/<uuid:conversation_id>/messages", methods=["GET"])
+def get_conversation_messages(conversation_id):
+    """Full message history for one conversation, chronological -- powers
+    resuming a conversation from the sidebar (or restoring it on reload)."""
+    conv = ConversationRepository(g.db_session).get_scoped(conversation_id, g.user)
+    if conv is None:
+        return error_response("Conversation not found", "CONVERSATION_NOT_FOUND", 404)
+
+    svc = ConversationService(g.db_session)
+    messages = svc.list_messages(conversation_id)
+    agent_names = svc.resolve_agent_names({m.agent_id for m in messages if m.agent_id})
+
+    return jsonify({
+        "conversation_id": str(conversation_id),
+        "messages": [
+            {
+                "id": str(m.id),
+                "role": m.role,
+                "content": m.content,
+                "agent_name": agent_names.get(m.agent_id),
+                "options": m.options,
+                "selected_option_id": m.selected_option_id,
+                "created_at": m.created_at.isoformat(),
+            }
+            for m in messages
+        ],
     })
 
 @chat_bp.route("/api/reset", methods=["POST"])

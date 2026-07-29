@@ -251,6 +251,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 li.appendChild(titleRow);
                 li.appendChild(descDiv);
+
+                li.addEventListener('click', () => {
+                    clearActiveItems();
+                    li.classList.add('active');
+                    loadConversationHistory(conv.id);
+
+                    if (window.innerWidth <= 768) {
+                        sidebar.classList.remove('active');
+                        sidebarOverlay.classList.remove('active');
+                    }
+                });
+
                 recentConversationsList.appendChild(li);
             });
         } catch (error) {
@@ -260,6 +272,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
     loadRecentConversations();
 
+    // A page reload with an active conversation still in sessionStorage should
+    // restore its visible history, not silently fall back to the static
+    // greeting -- this is what main.js:95-97's own comment already claimed.
+    if (conversationId) {
+        loadConversationHistory(conversationId);
+    }
+
     // -----------------------------------------------------------------------
     // Message rendering
     // -----------------------------------------------------------------------
@@ -267,7 +286,7 @@ document.addEventListener('DOMContentLoaded', () => {
         chatMessages.scrollTop = chatMessages.scrollHeight;
     }
 
-    function addMessage(content, type, agentName = null, messageId = null) {
+    function addMessage(content, type, agentName = null, messageId = null, timestamp = new Date()) {
         const messageDiv = document.createElement('div');
         messageDiv.className = `message ${type}`;
         if (messageId) messageDiv.dataset.messageId = messageId;
@@ -298,7 +317,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const meta = document.createElement('div');
             meta.className = 'message-meta';
-            meta.textContent = `${formatTime(new Date())} · ${agentName || 'Home'}`;
+            meta.textContent = `${formatTime(timestamp)} · ${agentName || 'Home'}`;
             body.appendChild(meta);
 
             messageDiv.appendChild(body);
@@ -313,7 +332,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const meta = document.createElement('div');
             meta.className = 'message-meta';
-            meta.textContent = formatTime(new Date());
+            meta.textContent = formatTime(timestamp);
             body.appendChild(meta);
 
             messageDiv.appendChild(body);
@@ -341,7 +360,7 @@ document.addEventListener('DOMContentLoaded', () => {
     //     3. DISABLE THE WHOLE GROUP — §1.6: two user messages in a row silently
     //        collapse in Mitra's DB. A double-submit destroys an answer.
     // -----------------------------------------------------------------------
-    function renderOptions(options, messageDiv) {
+    function renderOptions(options, messageDiv, { readOnly = false, selectedId = null } = {}) {
         if (!options || options.length === 0) return;
 
         const group = document.createElement('div');
@@ -354,17 +373,26 @@ document.addEventListener('DOMContentLoaded', () => {
             btn.dataset.value = opt.value;
             btn.textContent = opt.label;
 
-            btn.addEventListener('click', () => {
-                // Disable the whole group immediately — before the POST —
-                // so a slow network can't allow a double-click to go through.
-                group.querySelectorAll('.option-btn').forEach(b => {
-                    b.disabled = true;
-                    b.classList.add('option-btn--used');
-                });
+            if (readOnly) {
+                // Historical replay: already answered (or the conversation moved
+                // on) -- show the group as decided, never live. No listener at
+                // all, so a replayed option group can't re-fire sendMessage.
+                btn.disabled = true;
+                btn.classList.add('option-btn--used');
+                if (opt.id === selectedId) btn.classList.add('option-btn--selected');
+            } else {
+                btn.addEventListener('click', () => {
+                    // Disable the whole group immediately — before the POST —
+                    // so a slow network can't allow a double-click to go through.
+                    group.querySelectorAll('.option-btn').forEach(b => {
+                        b.disabled = true;
+                        b.classList.add('option-btn--used');
+                    });
 
-                addMessage(opt.label, 'user');
-                sendMessage(opt.value, opt.id);
-            });
+                    addMessage(opt.label, 'user');
+                    sendMessage(opt.value, opt.id);
+                });
+            }
 
             group.appendChild(btn);
         });
@@ -374,6 +402,49 @@ document.addEventListener('DOMContentLoaded', () => {
             body.appendChild(group);
         } else {
             messageDiv.appendChild(group);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Resume a conversation -- replays its full history into the chat pane.
+    // Used both for a sidebar recent-conversation click and for restoring
+    // sessionStorage.saarthi_cid on page reload (main.js:95-97's own comment
+    // already claimed reload-restore worked; this is what makes that true).
+    // -----------------------------------------------------------------------
+    async function loadConversationHistory(id) {
+        try {
+            const response = await fetch(`/api/conversations/${id}/messages`);
+            if (!response.ok) return;
+            const data = await response.json();
+
+            chatMessages.innerHTML = '';
+
+            let lastAgentName = null;
+            data.messages.forEach(m => {
+                const type = m.role === 'assistant' ? 'agent' : 'user';
+                if (m.role === 'assistant') lastAgentName = m.agent_name;
+
+                const messageDiv = addMessage(m.content, type, m.agent_name, m.id, new Date(m.created_at));
+
+                if (m.role === 'assistant' && m.options && m.options.length) {
+                    renderOptions(m.options, messageDiv, { readOnly: true, selectedId: m.selected_option_id });
+                }
+            });
+
+            // Deliberately does NOT set currentAgentKey -- the backend's own
+            // session-pin state already drives routing for the next real
+            // message correctly; duplicating that decision here would just be
+            // a second, driftable copy of server-side truth.
+            conversationId = id;
+            sessionStorage.setItem('saarthi_cid', id);
+
+            if (lastAgentName) {
+                setContextBanner(lastAgentName, 'Resumed conversation');
+            }
+
+            scrollToBottom();
+        } catch (error) {
+            console.error('Failed to load conversation history:', error);
         }
     }
 
