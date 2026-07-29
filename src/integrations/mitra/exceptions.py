@@ -12,13 +12,25 @@ class MitraError(Exception):
 
 
 class MitraHTTPError(MitraError):
-    """Raised when Mitra returns a non-2xx HTTP status code."""
+    """Raised when Mitra returns a non-2xx HTTP status code.
 
-    def __init__(self, method: str, path: str, status: int) -> None:
-        # Deliberately DO NOT include response body — it may contain the
-        # Origin header value reflected back, or other sensitive context.
-        super().__init__(f"Mitra {method} {path} returned HTTP {status}")
+    ``detail`` carries Mitra's OWN structured error text (the ``error_message``
+    / ``error_type`` keys of its error envelope), extracted key-by-key by
+    ``MitraRestClient._extract_error_detail`` — never the raw body, which can
+    reflect request headers back (§13.2). Without it every upstream failure
+    reads "returned HTTP 500" and gives an operator nothing to act on: a
+    missing Mitra Flow row and a genuine Mitra outage look identical.
+    """
+
+    def __init__(
+        self, method: str, path: str, status: int, detail: Optional[str] = None
+    ) -> None:
+        msg = f"Mitra {method} {path} returned HTTP {status}"
+        if detail:
+            msg = f"{msg}: {detail}"
+        super().__init__(msg)
         self.status = status
+        self.detail = detail
 
 
 class MitraSSRFError(MitraError):

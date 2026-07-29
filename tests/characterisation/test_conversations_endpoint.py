@@ -220,3 +220,129 @@ def test_messages_404_for_another_users_conversation(client, as_user):
     response = client.get(f"/api/conversations/{conv_id}/messages")
 
     assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Session replay on resume.
+#
+# The "story is ready + download report" notice is generated client-side from
+# the /api/chat response; it is NOT a stored message. Replaying only the
+# transcript therefore lost the report link on every page reload. The messages
+# endpoint returns the conversation's latest session so the client can rebuild
+# that state from server truth.
+# ---------------------------------------------------------------------------
+
+def _seed_session(conversation_id: uuid.UUID, agent_id, state: str, **fields) -> uuid.UUID:
+    db = SessionLocal()
+    try:
+        sess_id = uuid.uuid4()
+        terminal = state in ("completed", "failed", "abandoned")
+        db.execute(text("""
+            INSERT INTO agent_sessions
+                (id, conversation_id, agent_id, state, step, result_ref, report_url,
+                 remote_provider, remote_session_id, remote_profile_id,
+                 started_at, finalized_at, ended_at)
+            VALUES
+                (:id, :conversation_id, :agent_id, :state, :step, :result_ref, :report_url,
+                 'mitra', :remote_session_id, :remote_profile_id,
+                 :started_at, :finalized_at, :ended_at)
+        """), {
+            # ck sess_active_has_remote: any non-pending/failed/abandoned state
+            # must carry remote_session_id. ck sess_completed_has_result: a
+            # completed session must carry result_ref.
+            "remote_session_id": f"remote-{uuid.uuid4().hex[:8]}",
+            "remote_profile_id": "380",
+            "id": sess_id,
+            "conversation_id": conversation_id,
+            "agent_id": agent_id,
+            "state": state,
+            "step": fields.get("step", 0),
+            "result_ref": fields.get("result_ref"),
+            "report_url": fields.get("report_url"),
+            "started_at": fields.get("started_at", datetime.now(timezone.utc)),
+            # ck_agent_sess constraints: terminal states require ended_at.
+            "finalized_at": datetime.now(timezone.utc) if terminal else None,
+            "ended_at": datetime.now(timezone.utc) if terminal else None,
+        })
+        db.commit()
+        return sess_id
+    finally:
+        db.close()
+
+
+def test_messages_returns_completed_session_so_a_reload_keeps_the_report_link(client, as_user):
+    """THE regression test: refresh must not lose the download button."""
+    user = _new_user()
+    as_user(user)
+    conv_id = _seed_conversation(user, "my story", datetime.now(timezone.utc))
+    agent_id, _ = _general_support_agent()
+    _seed_message(conv_id, 1, "user", "record a story")
+
+    url = "https://qa-mohini-static.example.org/chatbot/storymedia/4119/story.pdf"
+    sess_id = _seed_session(
+        conv_id, agent_id, "completed", step=16, result_ref="4119", report_url=url,
+    )
+
+    body = client.get(f"/api/conversations/{conv_id}/messages").get_json()
+
+    assert body["session"] is not None, "a reload has no other way to recover the report link"
+    assert body["session"]["id"] == str(sess_id)
+    assert body["session"]["state"] == "completed"
+    assert body["session"]["report_url"] == url
+    assert body["session"]["result_ref"] == "4119"
+    assert body["session"]["step"] == 16
+
+
+def test_messages_returns_null_session_for_a_conversation_that_never_had_one(client, as_user):
+    """Plain LLM conversations have no session; the key must still be present
+    and null so the client can branch on it without guarding for undefined."""
+    user = _new_user()
+    as_user(user)
+    conv_id = _seed_conversation(user, "just chatting", datetime.now(timezone.utc))
+    _seed_message(conv_id, 1, "user", "hello")
+
+    body = client.get(f"/api/conversations/{conv_id}/messages").get_json()
+
+    assert "session" in body
+    assert body["session"] is None
+
+
+def test_messages_returns_the_latest_session_not_the_first(client, as_user):
+    """A conversation can hold several sessions over its life; resuming must
+    reflect the most recent one, not whichever was inserted first."""
+    user = _new_user()
+    as_user(user)
+    conv_id = _seed_conversation(user, "two stories", datetime.now(timezone.utc))
+    agent_id, _ = _general_support_agent()
+
+    older = datetime.now(timezone.utc) - timedelta(hours=2)
+    _seed_session(conv_id, agent_id, "abandoned", started_at=older)
+    newest_id = _seed_session(
+        conv_id, agent_id, "completed", result_ref="4119",
+        report_url="https://static.example.org/x.pdf",
+        started_at=datetime.now(timezone.utc),
+    )
+
+    body = client.get(f"/api/conversations/{conv_id}/messages").get_json()
+
+    assert body["session"]["id"] == str(newest_id)
+    assert body["session"]["result_ref"] == "4119"
+
+
+def test_session_is_not_exposed_across_tenants(client, as_user):
+    """The existing 404 scoping must still gate the new field -- it carries a
+    report URL, so leaking it would be worse than leaking the transcript."""
+    owner = _new_user()
+    as_user(owner)
+    conv_id = _seed_conversation(owner, "private story", datetime.now(timezone.utc))
+    agent_id, _ = _general_support_agent()
+    _seed_session(
+        conv_id, agent_id, "completed", result_ref="4119",
+        report_url="https://static.example.org/secret.pdf",
+    )
+
+    as_user(_new_user())
+    response = client.get(f"/api/conversations/{conv_id}/messages")
+
+    assert response.status_code == 404
+    assert "secret.pdf" not in response.get_data(as_text=True)

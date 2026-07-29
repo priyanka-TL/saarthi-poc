@@ -38,6 +38,25 @@ choices in three structurally different objects:
 All three are normalised to ``Frame.options: list[ParsedOption]``. The
 channel sees one shape regardless of which Mitra code path fired.
 
+**Defect 4 — Internal LLM payload leaked as ``msg``.** ``msg`` is a string on
+every legitimate frame. But when the model answers with a LIST holding both a
+response object and a tool call --
+``[{'response': ..., 'response_reason': ...}, {'name': 'get_state_information',
+'parameters': {...}}]`` -- Mitra's own guard misses it:
+``guided_guest_tool_call.py:63-68`` only tests ``isinstance(response, dict)``
+and ``isinstance(response, str)``, so a list is neither a function call nor
+text, and the raw object is passed to ``translate_and_send_message`` as the
+bot's reply. ``async_base_consumer.py:45`` then ``json.dumps``es it, so ``msg``
+arrives as a JSON ARRAY. Coercing that with ``str()`` renders Mitra's internal
+tool-call payload into the user's chat bubble.
+
+``Frame.control_payload`` marks these. A non-string ``msg`` is never
+user-facing text, so the parser recovers the embedded ``response`` string when
+there is one and otherwise contributes no text at all. Mitra does NOT advance
+``chat_session.current_step`` on this path (it takes the else-branch), so the
+interview is not lost -- the user's next answer is processed against the same
+step.
+
 DESIGN RULES
 ============
 * ``parse(raw)`` NEVER raises. Malformed JSON, missing keys, wrong types —
@@ -103,6 +122,9 @@ class Frame:
     ``finish_reason`` — truthy when this is the last chunk of a bot turn
     ``options``       — normalised choice buttons (may be empty)
     ``error``         — human-readable parse/system error (non-empty on ERROR / SYSTEM)
+    ``control_payload`` — msg carried an internal Mitra object, not text (§Defect 4).
+                      ``msg`` holds the recovered ``response`` string, or "" if
+                      the payload had nothing user-facing in it.
     """
     kind: FrameKind
     source: str = ""
@@ -111,6 +133,7 @@ class Frame:
     finish_reason: Optional[str] = None
     options: list[ParsedOption] = field(default_factory=list)
     error: str = ""
+    control_payload: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +147,59 @@ def _coerce_str(v: object, default: str = "") -> str:
     if isinstance(v, str):
         return v
     return str(v)
+
+
+def _recover_response_text(obj: object, _depth: int = 0) -> str:
+    """Pull any user-facing ``response`` strings out of a leaked LLM payload.
+
+    Mitra's own handlers treat the ``response`` key as the text meant for the
+    user, so when the leaked object carries a non-empty one that IS the reply
+    and is worth showing. In the observed case it was ``''`` (the model put
+    everything in the tool call), which is why this returns "" rather than
+    inventing text.
+
+    Depth-capped: this walks a payload from an upstream service, and a
+    self-referential or pathologically nested one must not blow the stack.
+    """
+    if _depth > 6:
+        return ""
+
+    if isinstance(obj, dict):
+        parts = []
+        value = obj.get("response")
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+        elif isinstance(value, (dict, list)):
+            nested = _recover_response_text(value, _depth + 1)
+            if nested:
+                parts.append(nested)
+        return " ".join(parts)
+
+    if isinstance(obj, list):
+        parts = [_recover_response_text(item, _depth + 1) for item in obj]
+        return " ".join(p for p in parts if p)
+
+    return ""
+
+
+def _coerce_message_text(v: object) -> tuple[str, bool]:
+    """Return ``(text, is_control_payload)`` for a raw ``msg`` value.
+
+    ``msg`` is a string on every legitimate frame. A list/dict means Mitra
+    leaked an internal LLM object (§Defect 4) -- str()ing it is what printed
+    ``[{'response': '', 'name': 'get_state_information', ...}]`` into a chat
+    bubble. Structure is the signal here, deliberately: matching on substrings
+    like "get_state_information" would be guesswork that could also swallow a
+    legitimate reply which happens to quote one.
+    """
+    if v is None:
+        return "", False
+    if isinstance(v, str):
+        return v, False
+    if isinstance(v, (int, float, bool)):
+        # Scalar: str() is meaningful, keep the old lenient behaviour.
+        return str(v), False
+    return _recover_response_text(v), True
 
 
 def _coerce_int(v: object, default: int = 0) -> int:
@@ -192,7 +268,7 @@ def _normalise_options(extra_content: object) -> list[ParsedOption]:
 def _parse_text_envelope(text: dict) -> Frame:
     """Parse the primary ``{"text": {...}}`` envelope (§1.2 / §1.3)."""
     source        = _coerce_str(text.get("source"))
-    msg           = _coerce_str(text.get("msg"))
+    msg, control  = _coerce_message_text(text.get("msg"))
     step          = _coerce_int(text.get("step"))
     finish_reason = text.get("finish_reason")   # keep None vs "" distinction
     extra_content = text.get("extra_content")
@@ -205,6 +281,7 @@ def _parse_text_envelope(text: dict) -> Frame:
             source=source,
             msg=msg,
             step=step,
+            control_payload=control,
         )
 
     # System / error frame
@@ -215,6 +292,7 @@ def _parse_text_envelope(text: dict) -> Frame:
             msg=msg,
             step=step,
             error=error_val or msg,
+            control_payload=control,
         )
 
     # Bot turn — chunked or final
@@ -231,6 +309,7 @@ def _parse_text_envelope(text: dict) -> Frame:
         step=step,
         finish_reason=_coerce_str(finish_reason) if finish_reason else None,
         options=options,
+        control_payload=control,
     )
 
 
@@ -255,7 +334,7 @@ def _parse_legacy_envelope(raw: dict) -> Frame:
     parser works across Mitra deployment variants.
     """
     envelope_type = _coerce_str(raw.get("type")).lower()
-    msg           = _coerce_str(
+    msg, control  = _coerce_message_text(
         raw.get("msg") or raw.get("message") or raw.get("text") or raw.get("content")
     )
     error_val     = _coerce_str(raw.get("error") or raw.get("err"))
@@ -266,6 +345,7 @@ def _parse_legacy_envelope(raw: dict) -> Frame:
             source="system",
             msg=msg,
             error=error_val or (msg if envelope_type == "error" else ""),
+            control_payload=control,
         )
 
     if envelope_type in _LEGACY_OPTION_TYPES:
@@ -278,6 +358,7 @@ def _parse_legacy_envelope(raw: dict) -> Frame:
             msg=msg,
             finish_reason="stop",
             options=_normalise_options(extra),
+            control_payload=control,
         )
 
     if envelope_type in _LEGACY_BOT_TYPES or envelope_type == "text":
@@ -287,6 +368,7 @@ def _parse_legacy_envelope(raw: dict) -> Frame:
             source="bot",
             msg=msg,
             finish_reason=finish_reason,
+            control_payload=control,
         )
 
     # Unknown type — treat as a system/info frame.

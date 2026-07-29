@@ -36,6 +36,14 @@ from src.logger import get_logger
 
 logger = get_logger("mitra_ws_channel")
 
+# Shown when a turn contained nothing but a leaked internal payload. Mitra has
+# its own wording for the equivalent situation (guided_guest_tool_call.py:59,
+# "I am sorry, I could not understood completely...") -- same intent, fixed
+# grammar, since this string is user-visible.
+UNREADABLE_TURN_MESSAGE = (
+    "Sorry, I didn't quite catch that. Could you say it again?"
+)
+
 
 @dataclass(frozen=True)
 class BotTurn:
@@ -180,6 +188,7 @@ class MitraChannel:
             chunks: List[str] = []
             options: List[ParsedOption] = []
             step: Optional[int] = None
+            saw_control_payload = False
             deadline = time.monotonic() + timeout_s
             last_rx = time.monotonic()
 
@@ -204,6 +213,17 @@ class MitraChannel:
                     continue
 
                 last_rx = time.monotonic()
+                if f.control_payload:
+                    # Mitra leaked an internal LLM object instead of a reply
+                    # (frame_parser §Defect 4). The parser has already stripped
+                    # it down to whatever was user-facing; log it, because it
+                    # means Mitra dropped a turn and only this side can see it.
+                    saw_control_payload = True
+                    logger.warning(
+                        "Mitra sent an internal control payload as bot text "
+                        "(step=%s, recovered=%r) -- see frame_parser Defect 4",
+                        f.step, f.msg[:120],
+                    )
                 if f.msg:
                     chunks.append(f.msg)  # §1.3 ACCUMULATE
                 if f.step is not None:
@@ -213,7 +233,16 @@ class MitraChannel:
                 if f.finish_reason:
                     break  # §1.3 END OF TURN
 
-            return BotTurn(text="".join(chunks), options=options, step=step)
+            text_out = "".join(chunks)
+            if not text_out and saw_control_payload:
+                # The leaked payload was ALL the turn contained, so there is
+                # nothing to show. An empty bubble is worse than saying so, and
+                # Mitra does not advance current_step on this path -- the next
+                # answer is processed against the same step, so re-prompting
+                # genuinely recovers the interview.
+                text_out = UNREADABLE_TURN_MESSAGE
+
+            return BotTurn(text=text_out, options=options, step=step)
         finally:
             self._turn_lock.release()
 

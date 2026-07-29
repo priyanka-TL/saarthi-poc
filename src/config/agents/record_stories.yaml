@@ -23,7 +23,15 @@ remote:
     turn_timeout_ms: 45000
     idle_gap_ms: 8000
   completion_poll_every_turn: true
-  finalize_path: /api/end-story/v2/
+  # v1, NOT v2. v2 resolves the story bot via Flow.objects.get(flow_route=flow),
+  # and Mitra has no Flow row for 'guest-mi-story' -- only 'guest-discussion'
+  # is registered there (verified against QA: GET /api/flow-connection-info/
+  # ?flow_route=guest-mi-story returns 404). v2 turns that missing row into an
+  # HTTP 500, so every story finalisation failed. v1 resolves the same flow
+  # from the SessionFlowName enum -> CompanyBot '/guest-story', which does
+  # exist, and is what the Node bot uses for this flow too.
+  # Move back to /api/end-story/v2/ once Mitra registers the Flow row.
+  finalize_path: /api/end-story/
   report_path: /api/get-story/
   report_media_type: application/pdf
 

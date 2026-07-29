@@ -158,7 +158,12 @@ class RemoteSpec(BaseModel):
     handshake: MitraHandshakeSpec = Field(default_factory=MitraHandshakeSpec)
     turn:      MitraTurnSpec      = Field(default_factory=MitraTurnSpec)
     completion_poll_every_turn: bool = True
-    finalize_path:     str = "/api/end-story/v2/"
+    # Constrained, not a free string: a typo here is only discoverable as a
+    # 404/500 from Mitra AFTER a full interview, whereas a Literal rejects it
+    # at config-sync with a field path. v1 vs v2 is a real behavioural choice
+    # (they resolve the story bot from different Mitra tables), not a version
+    # preference -- see MitraRestClient's module docstring.
+    finalize_path:     Literal["/api/end-story/", "/api/end-story/v2/"] = "/api/end-story/v2/"
     report_path:       str = "/api/get-story/"
     report_media_type: str = "application/pdf"
 

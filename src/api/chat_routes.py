@@ -3,6 +3,7 @@ import uuid
 from src.services.conversations import ConversationService
 from src.services.session_service import SessionService
 from src.repositories.conversations import ConversationRepository
+from src.repositories.sessions import AgentSessionRepository
 from src.domain.core import MemorySpec
 from src.settings import settings
 from src.api.errors import error_response, mitra_error_response
@@ -123,8 +124,28 @@ def get_conversation_messages(conversation_id):
     messages = svc.list_messages(conversation_id)
     agent_names = svc.resolve_agent_names({m.agent_id for m in messages if m.agent_id})
 
+    # The completion notice (story ready + report link) is rendered by the
+    # client from the /api/chat response and is NOT a stored message, so a
+    # reload replayed the transcript without it and the download link vanished.
+    # Returning the session here lets the client rebuild that state from server
+    # truth instead of persisting a synthetic message row for it.
+    session_dto = AgentSessionRepository(g.db_session).get_latest_for_conversation(conversation_id)
+    session_payload = None
+    if session_dto is not None:
+        container = current_app.config["CONTAINER"]
+        agent = container.agent_registry.get_by_id(str(session_dto.agent_id))
+        session_payload = {
+            "id": str(session_dto.id),
+            "state": session_dto.state,
+            "step": session_dto.step,
+            "agent_key": agent.key if agent is not None else None,
+            "result_ref": session_dto.result_ref,
+            "report_url": session_dto.report_url,
+        }
+
     return jsonify({
         "conversation_id": str(conversation_id),
+        "session": session_payload,
         "messages": [
             {
                 "id": str(m.id),

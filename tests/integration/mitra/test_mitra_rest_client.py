@@ -269,6 +269,68 @@ def test_finalize_sends_token_in_authorization_header_not_body():
 
 
 @resp_lib.activate
+def test_finalize_posts_to_the_configured_path_not_a_hardcoded_v2():
+    """spec.remote.finalize_path selects the endpoint.
+
+    v1 and v2 resolve the story bot from different Mitra tables, so an agent
+    whose flow has no Flow row must be able to target v1 by config. Before
+    this, finalize() hardcoded v2 and the YAML field was dead config -- which
+    is how record_stories ended up posting 'guest-mi-story' to the one
+    endpoint that cannot resolve it (deterministic HTTP 500).
+    """
+    fixture = _load("end_story_v2.json")
+    resp_lib.add(resp_lib.POST, f"{BASE_URL}/api/end-story/", json=fixture, status=200)
+
+    story_id, _ = _client().finalize(
+        session_id="mitra-session-abc123",
+        profile_id="1355",
+        flow="guest-mi-story",
+        language="en",
+        token="test-bearer-token",
+        path="/api/end-story/",
+    )
+
+    assert story_id == fixture["id"]
+    assert resp_lib.calls[0].request.url == f"{BASE_URL}/api/end-story/"
+
+
+@resp_lib.activate
+def test_finalize_v1_puts_token_in_body_and_not_in_the_header():
+    """The v1 view reads request.data['access_token']; it never looks at the
+    Authorization header. Selecting the path without moving the token would
+    send an unauthenticated finalize that still returns 200 -- silently
+    dropping the Elevate push -- so path and token placement move together.
+    """
+    resp_lib.add(
+        resp_lib.POST, f"{BASE_URL}/api/end-story/",
+        json=_load("end_story_v2.json"), status=200,
+    )
+
+    _client().finalize("sess", "prof", "guest-mi-story", "en", "tok", path="/api/end-story/")
+
+    call = resp_lib.calls[0]
+    _assert_origin_sent(call)
+    assert json.loads(call.request.body)["access_token"] == "tok"
+    assert "Authorization" not in call.request.headers
+
+
+@resp_lib.activate
+def test_finalize_defaults_to_v2_when_no_path_is_given():
+    """Omitting path must keep the pre-existing v2 behaviour, header token
+    included -- agents that don't set finalize_path are unaffected."""
+    resp_lib.add(
+        resp_lib.POST, f"{BASE_URL}/api/end-story/v2/",
+        json=_load("end_story_v2.json"), status=200,
+    )
+
+    _client().finalize("sess", "prof", "guest-discussion", "en", "tok")
+
+    call = resp_lib.calls[0]
+    assert call.request.headers.get("Authorization") == "Bearer tok"
+    assert "access_token" not in json.loads(call.request.body)
+
+
+@resp_lib.activate
 def test_finalize_raises_on_missing_id():
     """If Mitra omits 'id' from the response, raise MitraError."""
     resp_lib.add(
@@ -448,6 +510,68 @@ def test_http_error_raises_mitra_http_error():
     assert exc_info.value.status == 401
     # Error message must NOT contain the Origin value
     assert ORIGIN_URL not in str(exc_info.value)
+
+
+@resp_lib.activate
+def test_http_error_carries_mitras_own_error_message():
+    """"returned HTTP 500" alone is unactionable -- it reads identically for a
+    Mitra outage and for a flow Mitra cannot resolve, which is what sent the
+    end-story investigation to the wrong layer repeatedly. Mitra's error
+    envelope names the real cause; surface it.
+    """
+    resp_lib.add(
+        resp_lib.POST,
+        f"{BASE_URL}/api/end-story/v2/",
+        json={
+            "status": "error",
+            "message": "",
+            "error_message": "Flow not found with route: guest-mi-story",
+            "error_type": "generic_error",
+        },
+        status=500,
+    )
+
+    with pytest.raises(MitraHTTPError) as exc_info:
+        _client().finalize("sess", "prof", "guest-mi-story", "en", "tok")
+
+    assert "Flow not found with route: guest-mi-story" in str(exc_info.value)
+    assert exc_info.value.detail is not None
+
+
+@resp_lib.activate
+def test_http_error_detail_is_dropped_when_it_reflects_the_origin_credential():
+    """§13.2: the edge can echo the Origin header back inside an error body.
+    Extraction is per-key and never the raw body, but the keys themselves are
+    dropped too if the credential turns up in them."""
+    resp_lib.add(
+        resp_lib.GET,
+        f"{BASE_URL}/api/generate-session/",
+        json={"detail": f"Origin {ORIGIN_URL} is not allowed"},
+        status=403,
+    )
+
+    with pytest.raises(MitraHTTPError) as exc_info:
+        _client().generate_session()
+
+    assert ORIGIN_URL not in str(exc_info.value)
+    assert exc_info.value.detail is None
+
+
+@resp_lib.activate
+def test_http_error_detail_is_none_for_a_non_json_body():
+    """HTML error pages from a proxy must not end up in the exception."""
+    resp_lib.add(
+        resp_lib.GET,
+        f"{BASE_URL}/api/generate-session/",
+        body="<html><body>502 Bad Gateway</body></html>",
+        status=502,
+    )
+
+    with pytest.raises(MitraHTTPError) as exc_info:
+        _client().generate_session()
+
+    assert exc_info.value.detail is None
+    assert "<html>" not in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------

@@ -233,6 +233,22 @@ class ConfigSyncService:
                 {"agent_id": agent_id}
             ).scalar()
             
+            if adopt:
+                # DEACTIVATE BEFORE INSERTING, not after. uq_agent_cfg_one_active
+                # is a PARTIAL UNIQUE INDEX (migration 0002) -- `unique(agent_id)
+                # WHERE is_active` -- and an index is checked per statement, with
+                # no DEFERRABLE option. Inserting the new active row first meant
+                # two active rows existed for the duration of one statement, so
+                # the INSERT itself raised UniqueViolation and the old
+                # deactivate-afterwards UPDATE never ran. Effect: the FIRST edit
+                # to any already-synced agent YAML crashed startup
+                # (sync_and_reload has no try/except, by design), which is why
+                # this only ever showed up when a shipped agent config changed.
+                session.execute(
+                    text("UPDATE agent_configurations SET is_active = false WHERE agent_id = :agent_id AND is_active = true"),
+                    {"agent_id": agent_id}
+                )
+
             session.execute(
                 text("""
                     INSERT INTO agent_configurations (agent_id, version, source, checksum, config, is_active, activated_at)
@@ -240,12 +256,8 @@ class ConfigSyncService:
                 """),
                 {"agent_id": agent_id, "version": new_v_row, "checksum": checksum, "config": canonical, "is_active": adopt}
             )
-            
+
             if adopt:
-                session.execute(
-                    text("UPDATE agent_configurations SET is_active = false WHERE agent_id = :agent_id AND version != :keep_v"),
-                    {"agent_id": agent_id, "keep_v": new_v_row}
-                )
                 audit_repo.insert(
                     action="config_activate", entity_type="agent_configuration", entity_id=agent_id,
                     before=active_cfg[2] if active_cfg else None, after=json.loads(canonical),

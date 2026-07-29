@@ -32,6 +32,24 @@ class AgentSessionRepository:
         ).scalar_one_or_none()
         return AgentSessionDTO.model_validate(row) if row else None
 
+    def get_latest_for_conversation(self, conversation_id: uuid.UUID) -> Optional[AgentSessionDTO]:
+        """Most recent session for a conversation in ANY state, terminal included.
+
+        Distinct from get_open_for_conversation, which excludes terminal states
+        by design (it backs the one-open-session invariant). Resuming a
+        conversation needs the opposite: a *completed* session is exactly the
+        one whose report link has to come back after a reload.
+
+        Ordered to match ix_sess_conv (conversation_id, started_at DESC).
+        """
+        row = self._session.execute(
+            select(AgentSession)
+            .where(AgentSession.conversation_id == conversation_id)
+            .order_by(AgentSession.started_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        return AgentSessionDTO.model_validate(row) if row else None
+
     def create_pending(self, conversation_id: uuid.UUID, agent_id: uuid.UUID) -> AgentSessionDTO:
         """No remote_* columns are known yet at creation time."""
         row = AgentSession(

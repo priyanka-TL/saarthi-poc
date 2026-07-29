@@ -413,3 +413,128 @@ class TestTolerance:
         raw = json.dumps({"completely": "alien", "shape": True})
         frame = parse(raw)
         assert frame.kind is FrameKind.ERROR
+
+
+# ---------------------------------------------------------------------------
+# 7. Defect 4 — internal LLM payload leaked into `msg`
+#
+# Reproduced verbatim from a live QA interview: the model answered with a LIST
+# holding a response object AND a tool call. Mitra's guard
+# (guided_guest_tool_call.py:63-68) only tests dict/str, so a list is neither a
+# function call nor text and the raw object went out as the bot's reply.
+# json.dumps put it on the wire as an ARRAY, and str()ing that printed
+# "[{'response': '', 'name': 'get_state_information', ...}]" into the user's
+# chat bubble.
+# ---------------------------------------------------------------------------
+
+# The exact payload observed, byte for byte.
+LEAKED_TOOL_CALL = [
+    {
+        "response": "",
+        "response_reason": (
+            "User provided a clear reason for the problem. Proceeding to "
+            "function call to get state information for the next state."
+        ),
+    },
+    {
+        "name": "get_state_information",
+        "parameters": {
+            "state_name": "MAIN_CHALLENGE",
+            "reason": (
+                "The user provided a clear reason for the problem, which is the "
+                "transportation issue leading to less attendance. This reason "
+                "logically explains the problem, so we are proceeding to the "
+                "next state."
+            ),
+        },
+    },
+]
+
+
+class TestLeakedControlPayload:
+
+    def _parse_leak(self, payload=None):
+        raw = json.dumps({
+            "text": {
+                "msg": LEAKED_TOOL_CALL if payload is None else payload,
+                "source": "bot",
+                "finish_reason": "stop",
+                "step": 9,
+            }
+        })
+        return parse(raw)
+
+    def test_the_observed_payload_never_reaches_the_user_as_text(self):
+        """THE regression test. Before this, msg was str(list) and the whole
+        tool call rendered in the chat bubble."""
+        frame = self._parse_leak()
+
+        assert frame.control_payload is True
+        assert frame.msg == "", f"leaked payload became user-visible text: {frame.msg!r}"
+        for artefact in ("get_state_information", "response_reason", "MAIN_CHALLENGE", "{'"):
+            assert artefact not in frame.msg
+
+    def test_frame_is_still_a_well_formed_bot_final(self):
+        """Suppressing the text must not corrupt the rest of the turn -- the
+        channel still needs finish_reason to know the turn ended, or it would
+        block until the idle-gap backstop on every occurrence."""
+        frame = self._parse_leak()
+        assert frame.kind is FrameKind.BOT_FINAL
+        assert frame.finish_reason == "stop"
+        assert frame.step == 9
+
+    def test_embedded_response_text_is_recovered_when_present(self):
+        """`response` is the key Mitra's own handlers treat as the user-facing
+        reply, so when the model does fill it in, that IS the turn."""
+        payload = [
+            {"response": "Thanks. What happened next?", "response_reason": "advancing"},
+            {"name": "get_state_information", "parameters": {"state_name": "NEXT"}},
+        ]
+        frame = self._parse_leak(payload)
+
+        assert frame.msg == "Thanks. What happened next?"
+        assert frame.control_payload is True
+
+    def test_dict_shaped_leak_is_handled_too(self):
+        """The list shape is what was observed, but a bare dict reaches the
+        same wire path and must not str() either."""
+        frame = self._parse_leak({"name": "get_state_information", "parameters": {"state_name": "X"}})
+        assert frame.control_payload is True
+        assert frame.msg == ""
+
+    def test_ordinary_string_messages_are_untouched(self):
+        """The guard keys off STRUCTURE, so nothing about normal text changes
+        -- including text that quotes the tool name."""
+        for text in ("What are the reasons for the problem?", "Use get_state_information to proceed", "[]", "{}"):
+            raw = json.dumps({"text": {"msg": text, "source": "bot", "finish_reason": "stop"}})
+            frame = parse(raw)
+            assert frame.msg == text
+            assert frame.control_payload is False
+
+    def test_numeric_msg_keeps_its_lenient_coercion(self):
+        raw = json.dumps({"text": {"msg": 42, "source": "bot", "finish_reason": "stop"}})
+        frame = parse(raw)
+        assert frame.msg == "42"
+        assert frame.control_payload is False
+
+    def test_deeply_nested_payload_does_not_raise_or_hang(self):
+        """parse() never raises (module contract) and the walk is depth-capped,
+        so a pathological payload from upstream cannot blow the stack."""
+        nested = {"response": {}}
+        cursor = nested
+        for _ in range(200):
+            cursor["response"] = {"response": {}}
+            cursor = cursor["response"]
+
+        frame = self._parse_leak(nested)
+        assert frame.kind is FrameKind.BOT_FINAL
+        assert frame.control_payload is True
+        assert isinstance(frame.msg, str)
+
+    def test_user_echo_of_a_leaked_payload_is_still_discarded(self):
+        """A control payload on a user-echo frame must keep USER_ECHO kind, or
+        the channel would stop discarding it (§1.2)."""
+        raw = json.dumps({"text": {"msg": LEAKED_TOOL_CALL, "source": "user", "finish_reason": None}})
+        frame = parse(raw)
+        assert frame.kind is FrameKind.USER_ECHO
+        assert frame.msg == ""

@@ -30,7 +30,7 @@ class _FakeMitraRest:
         self.story_id = "9931"
         self.report_url = None
 
-    def finalize(self, session_id, profile_id, flow, language, token):
+    def finalize(self, session_id, profile_id, flow, language, token, path="/api/end-story/v2/"):
         self.finalize_calls.append((session_id, profile_id, flow, language, token))
         return self.story_id, "narrative content"
 

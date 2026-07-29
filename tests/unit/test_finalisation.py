@@ -6,6 +6,7 @@ import pytest
 
 from src.agents.protocol import AgentSessionView, SessionDelta, SessionState
 from src.domain.sessions import AgentSessionDTO
+from src.integrations.mitra.exceptions import MitraSSRFError
 from src.services.orchestration import OrchestrationService
 from src.services.session_service import SessionService
 
@@ -53,10 +54,15 @@ def _completed_dto(session_dto: AgentSessionDTO, story_id: str) -> AgentSessionD
 
 
 
-def _make_agent(spec_remote_flow="guest-mi-story", spec_report_media="application/pdf"):
+def _make_agent(
+    spec_remote_flow="guest-mi-story",
+    spec_report_media="application/pdf",
+    spec_finalize_path="/api/end-story/",
+):
     agent = MagicMock()
     agent.spec.remote.flow_name = spec_remote_flow
     agent.spec.remote.report_media_type = spec_report_media
+    agent.spec.remote.finalize_path = spec_finalize_path
     return agent
 
 
@@ -146,6 +152,45 @@ class TestConcurrentFinalisation:
             "how many concurrent callers reach _finalize(). Mitra's Story.session "
             "is UNIQUE (story_models.py:30) — a second call would 4xx."
         )
+
+    def test_finalize_uses_the_agents_configured_endpoint(self):
+        """_finalize must pass spec.remote.finalize_path through.
+
+        Without it the client falls back to v2 for every agent, which for a
+        flow Mitra has no Flow row for is a guaranteed HTTP 500 -- the
+        end-story failure this pins.
+        """
+        orch, agent, session_dto, _, mitra_rest, _, _, user = self._setup_winner_loser()
+
+        orch._finalize(session_dto, agent, user)
+
+        assert mitra_rest.finalize.call_args.kwargs["path"] == "/api/end-story/"
+
+    def test_report_fetch_failure_still_completes_the_session(self):
+        """A failing get_report must NOT undo a successful finalize.
+
+        finalize() is irreversible (Mitra's Story.session is UNIQUE), so a
+        raise between it and the completed-transition leaves the session in
+        'finalizing' forever with a story that exists remotely and can never
+        be resubmitted. Observed live: report PDFs are served from a host
+        outside MITRA_ALLOWED_HOSTS, so _validate_url raised MitraSSRFError
+        on every successful story. GET /api/sessions/{id}/report already
+        treats the same failure as 'not ready yet'.
+        """
+        orch, agent, session_dto, _, mitra_rest, _, sessions_svc, user = (
+            self._setup_winner_loser()
+        )
+        mitra_rest.get_report.side_effect = MitraSSRFError()
+
+        result = orch._finalize(session_dto, agent, user)
+
+        assert result.state == "completed", (
+            "session must reach 'completed' even when the report URL cannot "
+            "be fetched -- 'finalizing' has no other way out"
+        )
+        applied_delta = sessions_svc.apply.call_args.args[1]
+        assert applied_delta.state == SessionState.completed
+        assert applied_delta.report_url is None
 
     def test_winner_returns_completed_session(self):
         orch, agent, session_dto, completed_dto, _, _, _, user = self._setup_winner_loser()

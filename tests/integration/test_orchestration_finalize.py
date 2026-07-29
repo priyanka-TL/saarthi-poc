@@ -33,15 +33,17 @@ class _FakeMitraRest:
     def __init__(self, call_order: List[str]):
         self._call_order = call_order
         self.finalize_calls: List[Tuple] = []
+        self.finalize_paths: List[str] = []
         self.get_report_calls: List[Tuple] = []
         self._story_id = "9931"
         self._content = "narrative content"
         self._report_url: Optional[str] = None
         self._finalize_error: Optional[Exception] = None
 
-    def finalize(self, session_id, profile_id, flow, language, token):
+    def finalize(self, session_id, profile_id, flow, language, token, path="/api/end-story/v2/"):
         self._call_order.append("finalize")
         self.finalize_calls.append((session_id, profile_id, flow, language, token))
+        self.finalize_paths.append(path)
         if self._finalize_error is not None:
             raise self._finalize_error
         return self._story_id, self._content
@@ -109,6 +111,7 @@ def _remote_agent(agent_id: uuid.UUID) -> _Agent:
         bot_route_env="TEST_BOT_ROUTE",
         company_env="TEST_COMPANY",
         report_media_type="application/pdf",
+        finalize_path="/api/end-story/",
     )
     spec = RemoteFlowAgentSpec(
         key="record_stories",
@@ -179,6 +182,11 @@ def test_won_claim_runs_full_sequence_in_order():
         assert called_flow == "guest-mi-story"
         assert called_lang == sess_view.language
         assert called_token == "the-real-token"
+
+        # ...and at the endpoint the AGENT declares, not a hardcoded one.
+        # 'guest-mi-story' has no Flow row in Mitra, so v2 answers it with an
+        # HTTP 500; the spec's finalize_path is what keeps this flow off v2.
+        assert rest.finalize_paths == [agent.spec.remote.finalize_path]
 
         # Resulting session is completed with result_ref/finalized_at/ended_at.
         assert result.state == "completed"

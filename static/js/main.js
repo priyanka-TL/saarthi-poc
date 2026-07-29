@@ -448,6 +448,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 setContextBanner(lastAgentName, 'Resumed conversation');
             }
 
+            // Replay the session state the transcript cannot carry. The
+            // completion notice is generated, not stored, so without this a
+            // reload silently dropped the report link on a finished story.
+            // Passing lastAgentName explicitly rather than leaning on the
+            // module-level `lastAgent`, which is still null on a fresh load.
+            _handleSession(data.session, lastAgentName);
+
             scrollToBottom();
         } catch (error) {
             console.error('Failed to load conversation history:', error);
@@ -483,20 +490,51 @@ document.addEventListener('DOMContentLoaded', () => {
         return notice;
     }
 
-    function _renderCompletedUI(session) {
+    // addMessage() renders 'system' messages with textContent, NOT innerHTML —
+    // that is the XSS guard for server-supplied strings and must stay. Passing
+    // it an <a> tag therefore printed the raw markup into the bubble instead of
+    // a link. Build the anchor as a DOM node instead, so the escaping rule is
+    // respected rather than worked around.
+    //
+    // Shape follows the WhatsApp client (storyPostSessionService.js:313-334):
+    // a confirmation line, then the download offered as its own distinct
+    // action — not a hyperlink buried mid-sentence.
+    function _appendReportAction(messageEl, url) {
+        const textDiv = messageEl.querySelector('.message-text');
+        if (!textDiv) return;
+
+        // The server already allowlists this URL (MitraRestClient._validate_url),
+        // but this is the one place it becomes a clickable href, so re-check the
+        // scheme here rather than trusting the response shape.
+        const safeUrl = DOMPurify.sanitize(url || '');
+        if (!/^https:\/\//i.test(safeUrl)) return;
+
+        const link = document.createElement('a');
+        link.className = 'report-link';
+        link.href = safeUrl;
+        link.target = '_blank';
+        link.rel = 'noopener';
+        link.textContent = '⬇  Download PDF report';
+        textDiv.appendChild(link);
+    }
+
+    function _renderCompletedUI(session, agentName = null) {
         // Remove the "writing…" notice if still present
         const notice = document.getElementById('session-finalizing-notice');
         if (notice) notice.remove();
 
+        // lastAgent, so the completion bubble is attributed to the interview
+        // agent like every bubble above it. Passing nothing made addMessage
+        // fall back to 'Home', which reads as a different speaker.
+        const attribution = agentName || lastAgent;
         if (session.report_url) {
-            addMessage(
-                `Your story has been written. <a href="${DOMPurify.sanitize(session.report_url)}" ` +
-                `target="_blank" rel="noopener" class="report-link">Download PDF report</a>`,
-                'system'
-            );
+            const msg = addMessage('✅ Your story is ready.', 'system', attribution);
+            _appendReportAction(msg, session.report_url);
         } else {
             // Report still generating — show a "checking…" message and poll
-            const pollMsg = addMessage('Your story is ready. Checking for the PDF report…', 'system');
+            const pollMsg = addMessage(
+                'Your story is ready. Checking for the PDF report…', 'system', attribution,
+            );
             _pollReport(session.id, pollMsg);
         }
     }
@@ -509,7 +547,9 @@ document.addEventListener('DOMContentLoaded', () => {
             attempts++;
             if (attempts > MAX_ATTEMPTS) {
                 _clearSessionPoll();
-                const body = placeholderEl.querySelector('.message-content');
+                // .message-text, not .message-content — the latter also holds
+                // the timestamp/agent line, which writing to it wipes out.
+                const body = placeholderEl.querySelector('.message-text');
                 if (body) body.textContent = 'PDF report is still being generated. Please check back later.';
                 return;
             }
@@ -519,10 +559,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (r.status === 200) {
                     const data = await r.json();
                     _clearSessionPoll();
-                    const body = placeholderEl.querySelector('.message-content');
+                    const body = placeholderEl.querySelector('.message-text');
                     if (body) {
-                        body.innerHTML = `Your story is ready. <a href="${DOMPurify.sanitize(data.report_url)}" ` +
-                            `target="_blank" rel="noopener" class="report-link">Download PDF report</a>`;
+                        body.textContent = '✅ Your story is ready.';
+                        _appendReportAction(placeholderEl, data.report_url);
                     }
                 }
                 // 202 → keep polling
@@ -530,7 +570,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }, 3000);
     }
 
-    function _handleSession(session) {
+    function _handleSession(session, agentName = null) {
         if (!session) return;
 
         if (session.state === 'finalizing') {
@@ -543,7 +583,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     const updated = await r.json();
                     if (updated.state === 'completed') {
                         _clearSessionPoll();
-                        _renderCompletedUI(updated);
+                        _renderCompletedUI(updated, agentName);
                     } else if (updated.state === 'failed' || updated.state === 'abandoned') {
                         _clearSessionPoll();
                         const notice = document.getElementById('session-finalizing-notice');
@@ -553,7 +593,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 } catch (_) { }
             }, 2000);
         } else if (session.state === 'completed') {
-            _renderCompletedUI(session);
+            _renderCompletedUI(session, agentName);
         }
     }
 

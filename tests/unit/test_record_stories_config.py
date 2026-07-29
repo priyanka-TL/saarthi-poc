@@ -65,6 +65,36 @@ def test_remote_env_var_names():
     assert remote.flow_name == "guest-mi-story"
 
 
+def test_finalize_path_is_v1_because_mitra_has_no_flow_row_for_this_flow():
+    """THE regression pin for the end-story HTTP 500.
+
+    /api/end-story/v2/ resolves the story bot with
+    Flow.objects.get(flow_route=flow). Mitra has no Flow row for
+    'guest-mi-story' (only 'guest-discussion' is registered), and its
+    end_story_v2 view reports that missing row as a 500, not a 404 -- so
+    every finalisation of this agent failed deterministically. v1 resolves
+    the same flow from the SessionFlowName enum instead and needs no Flow
+    row.
+
+    If someone "modernises" this back to v2, the story flow breaks again in
+    exactly the way that took several debugging rounds to find. Flip it only
+    together with a Mitra-side Flow row for 'guest-mi-story'.
+    """
+    assert _load_spec().remote.finalize_path == "/api/end-story/"
+
+
+def test_capture_discussion_stays_on_v2():
+    """The sibling agent's flow IS registered in Mitra's Flow table, so it
+    keeps the v2 endpoint (token in header). This asserts the fix was
+    per-agent config, not a global downgrade of every flow to v1."""
+    raw = yaml.safe_load(
+        (YAML_PATH.parent / "capture_discussion.yaml").read_text()
+    )
+    spec = _adapter.validate_python(raw)
+    assert spec.remote.flow_name == "guest-discussion"
+    assert spec.remote.finalize_path == "/api/end-story/v2/"
+
+
 def test_router_and_direct_selectable():
     routing = _load_spec().routing
     assert routing.router_selectable is True

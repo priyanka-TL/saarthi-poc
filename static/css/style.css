@@ -1123,16 +1123,52 @@ body {
     vertical-align: middle;
 }
 
-/* PDF report download link */
-.report-link {
+/* PDF report download — presented as its own action, mirroring the WhatsApp
+   client's quick-reply button rather than an inline link inside the sentence.
+
+   Selectors are qualified with .message-content deliberately. The generic
+   `.message-content a:hover` rule above is (0,3,0); a bare `.report-link:hover`
+   is (0,2,0) and LOSES, so hover re-applied var(--primary-color) to the text
+   on top of the var(--primary-color) background set here — purple on purple,
+   i.e. a button that went blank on hover. Matching the qualifier wins on
+   source order without resorting to !important. */
+.message-content a.report-link,
+.message-content a.report-link:visited {
+    /* `flex`, not `inline-flex`: this is appended after the confirmation text
+       inside .message-text, so an inline box shared that line and collided
+       with it. A block-level flex box starts on its own line; width:fit-content
+       keeps it shrink-wrapped instead of spanning the bubble. */
+    display: flex;
+    width: fit-content;
+    align-items: center;
+    gap: 6px;
+    margin-top: 10px;
+    padding: 8px 14px;
+    border: 1px solid var(--primary-color);
+    border-radius: 999px;
+    background: transparent;
     color: var(--primary-color);
     font-weight: 600;
-    text-decoration: underline;
-    text-underline-offset: 3px;
+    font-size: 0.9rem;
+    text-decoration: none;
+    /* Guard for longer translated labels on narrow screens. */
+    max-width: 100%;
+    word-break: break-word;
+    transition: background-color 0.15s ease, color 0.15s ease;
 }
 
-.report-link:hover {
-    color: var(--accent-color);
+.message-content a.report-link:hover,
+.message-content a.report-link:focus-visible {
+    background: var(--primary-color);
+    color: #fff;
+    text-decoration: none;   /* the generic a:hover rule adds an underline */
+}
+
+[data-theme="dark"] .message-content a.report-link:hover,
+[data-theme="dark"] .message-content a.report-link:focus-visible {
+    /* Dark theme has its own `.message-content a:hover` override, same trap. */
+    background: var(--primary-color);
+    color: #fff;
 }
 
 /* Retry button (§10.3 change 6 — UPSTREAM_TIMEOUT) */

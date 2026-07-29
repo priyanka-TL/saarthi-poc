@@ -29,8 +29,32 @@ All five methods in this module correspond to steps in the §1.8 table:
   upsert_profile       POST /api/profile/              step 1
   generate_session     GET  /api/generate-session/     step 2
   is_session_completed GET  /api/companychat/          step 7
-  finalize             POST /api/end-story/v2/         step 8
+  finalize             POST <spec.remote.finalize_path> step 8
   get_report           GET  /api/get-story/            step 9
+
+WHICH FINALIZE ENDPOINT (v1 vs v2)
+==================================
+The two end-story endpoints resolve the story bot by DIFFERENT mechanisms,
+and that -- not the token placement -- is what decides which one a flow may
+use (verified against mitra-service source):
+
+  /api/end-story/v2/  generate_story() -> get_story_company_bot_simple(flow)
+                      -> Flow.objects.get(flow_route=flow)
+                      Requires a row in Mitra's Flow table keyed on
+                      flow_route == flow.
+
+  /api/end-story/     create_story_object() -> get_story_company_bot(profile, flow)
+                      -> CompanyBot.objects.get(route='/guest-story') etc.,
+                      branching on the SessionFlowName enum. No Flow row
+                      needed.
+
+A flow with no Flow row 500s on v2 -- `Flow.objects.get` raises
+Flow.DoesNotExist, which get_story_company_bot_simple re-raises as DRF
+NotFound, which end_story_v2's `except Flow.DoesNotExist` does NOT match, so
+it lands in the view's generic `except Exception` -> HTTP 500. It is a
+CONFIGURATION error reported as a server error; it is deterministic, not a
+race. Which endpoint each agent uses is therefore per-agent config
+(``spec.remote.finalize_path``), not a global constant.
 """
 from __future__ import annotations
 
@@ -46,6 +70,16 @@ from src.integrations.mitra.exceptions import (
     MitraRedirectError,
     MitraSSRFError,
 )
+
+FINALIZE_V1_PATH = "/api/end-story/"
+FINALIZE_V2_PATH = "/api/end-story/v2/"
+
+
+def _is_v2_finalize(path: str) -> bool:
+    """Trailing slashes vary between the YAML and the constants; compare on
+    the normalised path so `/api/end-story/v2` and `/api/end-story/v2/` do
+    not disagree about where the token goes."""
+    return path.strip("/") == FINALIZE_V2_PATH.strip("/")
 
 
 class MitraRestClient:
@@ -174,15 +208,20 @@ class MitraRestClient:
         flow: str,
         language: str,
         token: str,
+        path: str = FINALIZE_V2_PATH,
     ) -> tuple[str, str]:
         """Submit the completed session for story synthesis.
 
-        POST /api/end-story/v2/ with ``Authorization: Bearer <token>``.
+        ``path`` comes from ``spec.remote.finalize_path`` and selects the
+        endpoint — see "WHICH FINALIZE ENDPOINT" in the module docstring for
+        why that is per-agent and not a constant.
 
         IMPORTANT — v2 vs v1 difference (§1.5):
           v2 reads the token from the ``Authorization: Bearer`` header.
-          v1 (still called by the Node bot) read it from the request body.
-          DO NOT add the token to the JSON payload — that is the v1 shape.
+          v1 reads it from the request body (``access_token``).
+        The token placement follows ``path`` automatically. Sending the v1
+        body shape to v2 leaves the call unauthenticated (v2 never reads the
+        body key) and vice versa, so these two must never be set separately.
 
         Returns:
             (story_id, content) where story_id is the Mitra Story.id.
@@ -192,19 +231,20 @@ class MitraRestClient:
         Mitra's side. The ``agent_sessions.state = 'finalizing'`` claim in
         ``SessionService`` is Saarthi's guard that prevents double-submission.
         """
-        data = self._request(
-            "POST",
-            "/api/end-story/v2/",
-            json={
-                "session": session_id,
-                "profile_id": profile_id,
-                "stage": "COMPLETED",
-                "flow": flow,
-                "language": language,
-                # Token goes in the HEADER (see above). NOT here.
-            },
-            extra_headers={"Authorization": f"Bearer {token}"},
-        )
+        payload = {
+            "session": session_id,
+            "profile_id": profile_id,
+            "stage": "COMPLETED",
+            "flow": flow,
+            "language": language,
+        }
+        extra_headers = None
+        if _is_v2_finalize(path):
+            extra_headers = {"Authorization": f"Bearer {token}"}
+        else:
+            payload["access_token"] = token
+
+        data = self._request("POST", path, json=payload, extra_headers=extra_headers)
         story_id = str(data.get("id", ""))
         content = str(data.get("content", ""))
         if not story_id:
@@ -281,12 +321,47 @@ class MitraRestClient:
             raise MitraRedirectError(response.status_code)
 
         if not response.ok:
-            raise MitraHTTPError(method, path, response.status_code)
+            raise MitraHTTPError(
+                method, path, response.status_code,
+                detail=self._extract_error_detail(response),
+            )
 
         try:
             return response.json()
         except Exception as exc:
             raise MitraError(f"Mitra {method} {path} returned non-JSON body") from exc
+
+    def _extract_error_detail(self, response) -> Optional[str]:
+        """Pull Mitra's own error text out of a failed response, safely.
+
+        SECURITY (§13.2): the raw body is NEVER returned. A 403 from the edge
+        can reflect the ``Origin`` credential back in its body, so this reads
+        only the three known keys of Mitra's JSON error envelope, truncates
+        them, and drops the result entirely if the credential appears in it
+        anyway. Non-JSON bodies (HTML error pages, proxy output) yield None.
+        """
+        try:
+            body = response.json()
+        except Exception:
+            return None
+        if not isinstance(body, dict):
+            return None
+
+        parts = [
+            str(body[key])
+            for key in ("error_message", "error_type", "detail")
+            if body.get(key)
+        ]
+        if not parts:
+            return None
+
+        detail = " | ".join(parts)[:300]
+        # Read the credential from its single home rather than keeping a
+        # second copy of it on the instance.
+        origin = self._fixed_headers.get("Origin")
+        if origin and origin in detail:
+            return None
+        return detail
 
     def _validate_url(self, url: str) -> None:
         """Assert that a URL returned by Mitra is safe to use.

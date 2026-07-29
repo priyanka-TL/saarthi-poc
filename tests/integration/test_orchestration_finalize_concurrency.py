@@ -33,7 +33,7 @@ class _FakeMitraRest:
         self._lock = threading.Lock()
         self.finalize_calls: List[Tuple] = []
 
-    def finalize(self, session_id, profile_id, flow, language, token):
+    def finalize(self, session_id, profile_id, flow, language, token, path="/api/end-story/v2/"):
         with self._lock:
             self.finalize_calls.append((session_id, profile_id, flow, language, token))
         return "9931", "narrative content"

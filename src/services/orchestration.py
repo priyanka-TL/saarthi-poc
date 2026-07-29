@@ -14,6 +14,7 @@ from src.services.router_service import RouterService, RouteDecision
 from src.services.session_service import SessionService
 from src.services.agent_registry import AgentRegistry
 from src.agents.factory import HandlerFactory
+from src.integrations.mitra.exceptions import MitraError
 from src.logger import get_logger
 
 logger = get_logger("orchestration")
@@ -273,6 +274,11 @@ class OrchestrationService:
                 flow=agent.spec.remote.flow_name,
                 language=claimed.language,
                 token=user.token,
+                # Per-agent, because v1 and v2 resolve the story bot from
+                # different Mitra tables -- see MitraRestClient's module
+                # docstring. Sending a flow to the endpoint that cannot
+                # resolve it is a deterministic HTTP 500.
+                path=agent.spec.remote.finalize_path,
             )
         except Exception as e:
             # Don't leave the session stuck in 'finalizing' forever -- that
@@ -290,9 +296,31 @@ class OrchestrationService:
         # 'completed' would raise InvalidTransitionError. Fetching the
         # report first lets result_ref and report_url land in the SAME
         # apply() call instead.
-        report_url = self._mitra_rest.get_report(
-            claimed.remote_session_id, media_type=agent.spec.remote.report_media_type,
-        )
+        # NON-FATAL, and it must stay that way. finalize() above already
+        # succeeded and is IRREVERSIBLE -- Mitra's Story.session is UNIQUE, so
+        # the story cannot be submitted a second time. Letting a report-URL
+        # problem propagate here left the session in 'finalizing' forever
+        # (the except above only guards finalize(), and nothing revisits
+        # 'finalizing'), with a story that exists in Mitra and can never be
+        # re-fetched. Observed live: Mitra serves report PDFs from a
+        # different host than MITRA_BASE_URL, so an incomplete
+        # MITRA_ALLOWED_HOSTS makes _validate_url raise MitraSSRFError on
+        # EVERY successful story.
+        #
+        # report_url is designed to be null here anyway -- generation lags,
+        # and GET /api/sessions/{id}/report polls for it later, where the
+        # identical failure is already treated as "not ready yet" (202).
+        try:
+            report_url = self._mitra_rest.get_report(
+                claimed.remote_session_id, media_type=agent.spec.remote.report_media_type,
+            )
+        except MitraError as e:
+            logger.warning(
+                "finalize: report fetch failed for session %s (%s); "
+                "completing without report_url -- the report route will retry",
+                claimed.id, e,
+            )
+            report_url = None
 
         # 5. Transition to completed -- apply() sets ended_at/finalized_at itself.
         #    report_url stays null if the report hasn't been generated yet;

@@ -18,7 +18,7 @@ from src.integrations.mitra.exceptions import (
     MitraRemoteError,
     MitraTurnTimeout,
 )
-from src.integrations.mitra.ws_channel import MitraChannel
+from src.integrations.mitra.ws_channel import MitraChannel, UNREADABLE_TURN_MESSAGE
 
 
 # ---------------------------------------------------------------------------
@@ -285,3 +285,82 @@ def test_alive_and_close():
 
     # Calling close() again must not raise.
     channel.close(quiet=True)
+
+
+# ---------------------------------------------------------------------------
+# Acceptance 8: a turn containing only a leaked internal payload
+#
+# frame_parser §Defect 4 strips the payload, which can leave the turn with no
+# text at all. Rendering that as an empty bubble is not acceptable either, so
+# the channel substitutes a re-prompt. Mitra does NOT advance
+# chat_session.current_step on this path, so the user's next answer is
+# processed against the same step and the interview actually recovers.
+# ---------------------------------------------------------------------------
+
+_LEAKED_TOOL_CALL = [
+    {"response": "", "response_reason": "Proceeding to function call."},
+    {"name": "get_state_information", "parameters": {"state_name": "MAIN_CHALLENGE"}},
+]
+
+
+def test_leaked_payload_turn_reprompts_instead_of_dumping_json():
+    fake = _FakeWebSocket()
+    fake.queue_raw(0.03, _text_frame(_LEAKED_TOOL_CALL, source="bot", finish_reason="stop", step=9))
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+
+    turn = channel.send_and_await_turn("Transportation issue", timeout_s=2.0, idle_gap_s=0.5)
+
+    assert turn.text == UNREADABLE_TURN_MESSAGE
+    assert "get_state_information" not in turn.text
+    assert "{'" not in turn.text
+    assert turn.step == 9
+
+
+def test_leaked_payload_alongside_real_text_keeps_only_the_real_text():
+    """No fallback when the turn did produce something to say -- the re-prompt
+    must not append itself to a perfectly good reply."""
+    fake = _FakeWebSocket()
+    fake.queue_raw(0.03, _text_frame(_LEAKED_TOOL_CALL, source="bot", finish_reason=None, step=9))
+    fake.queue_raw(0.0, _text_frame("What was the main challenge?", source="bot", finish_reason="stop", step=10))
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+
+    turn = channel.send_and_await_turn("Transportation issue", timeout_s=2.0, idle_gap_s=0.5)
+
+    assert turn.text == "What was the main challenge?"
+    assert UNREADABLE_TURN_MESSAGE not in turn.text
+
+
+def test_recovered_response_text_is_used_verbatim_without_the_fallback():
+    fake = _FakeWebSocket()
+    payload = [
+        {"response": "Got it. And who else was involved?"},
+        {"name": "get_state_information", "parameters": {"state_name": "NEXT"}},
+    ]
+    fake.queue_raw(0.03, _text_frame(payload, source="bot", finish_reason="stop", step=4))
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+
+    turn = channel.send_and_await_turn("ok", timeout_s=2.0, idle_gap_s=0.5)
+
+    assert turn.text == "Got it. And who else was involved?"
+
+
+def test_ordinary_turn_never_gets_the_fallback():
+    """Guard against the fallback leaking into the normal path."""
+    fake = _FakeWebSocket()
+    fake.queue_raw(0.03, _text_frame("What are the reasons for the problem?", source="bot", finish_reason="stop", step=8))
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+
+    turn = channel.send_and_await_turn("hi", timeout_s=2.0, idle_gap_s=0.5)
+
+    assert turn.text == "What are the reasons for the problem?"
+
+
+def test_silence_still_times_out_rather_than_reprompting():
+    """A turn with no frames at all is a TIMEOUT, not an unreadable payload --
+    the two must not be conflated, or a dead upstream would look like a normal
+    re-prompt and the session would never surface the failure."""
+    fake = _FakeWebSocket()  # empty script -> recv() blocks
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+
+    with pytest.raises(MitraTurnTimeout):
+        channel.send_and_await_turn("hello", timeout_s=0.3, idle_gap_s=0.2)
