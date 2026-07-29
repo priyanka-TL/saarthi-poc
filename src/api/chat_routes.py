@@ -127,31 +127,41 @@ def get_conversation_messages(conversation_id):
     # The completion notice (story ready + report link) is rendered by the
     # client from the /api/chat response and is NOT a stored message, so a
     # reload replayed the transcript without it and the download link vanished.
-    # Returning the session here lets the client rebuild that state from server
+    # Returning the sessions here lets the client rebuild that state from server
     # truth instead of persisting a synthetic message row for it.
-    session_dto = AgentSessionRepository(g.db_session).get_latest_for_conversation(conversation_id)
-    session_payload = None
-    if session_dto is not None:
-        container = current_app.config["CONTAINER"]
-        agent = container.agent_registry.get_by_id(str(session_dto.agent_id))
-        session_payload = {
-            "id": str(session_dto.id),
-            "state": session_dto.state,
-            "step": session_dto.step,
+    #
+    # ALL of them, not just the latest. A conversation can hold several (the
+    # router allows switching agents mid-conversation), and returning only the
+    # newest meant a later agent's session masked an earlier COMPLETED one --
+    # its report_url never reached the client, so reopening a finished story
+    # from history showed no Download PDF button even though the report existed.
+    container = current_app.config["CONTAINER"]
+    session_dtos = AgentSessionRepository(g.db_session).list_for_conversation(conversation_id)
+    sessions_payload = []
+    for dto in session_dtos:
+        agent = container.agent_registry.get_by_id(str(dto.agent_id))
+        sessions_payload.append({
+            "id": str(dto.id),
+            "state": dto.state,
+            "step": dto.step,
             "agent_key": agent.key if agent is not None else None,
-            "result_ref": session_dto.result_ref,
-            "report_url": session_dto.report_url,
-        }
+            "result_ref": dto.result_ref,
+            "report_url": dto.report_url,
+        })
 
     return jsonify({
         "conversation_id": str(conversation_id),
-        "session": session_payload,
+        "sessions": sessions_payload,
         "messages": [
             {
                 "id": str(m.id),
                 "role": m.role,
                 "content": m.content,
                 "agent_name": agent_names.get(m.agent_id),
+                # Which session produced this message, so the client can anchor
+                # per-session UI (the report link) to the right point in the
+                # timeline instead of dumping it at the end.
+                "agent_session_id": str(m.agent_session_id) if m.agent_session_id else None,
                 "options": m.options,
                 "selected_option_id": m.selected_option_id,
                 "created_at": m.created_at.isoformat(),

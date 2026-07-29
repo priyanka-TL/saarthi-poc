@@ -50,6 +50,27 @@ class AgentSessionRepository:
         ).scalar_one_or_none()
         return AgentSessionDTO.model_validate(row) if row else None
 
+    def list_for_conversation(self, conversation_id: uuid.UUID) -> List[AgentSessionDTO]:
+        """Every session a conversation has held, oldest first.
+
+        A conversation can legitimately hold more than one: the router supports
+        switching agents mid-conversation (that is what the flow breadcrumb
+        renders), and uq_sess_one_open_per_conv only forbids two OPEN sessions,
+        not a new one after an earlier one reached a terminal state.
+
+        get_latest_for_conversation answers "what is in flight" and is still
+        right for that. It is the wrong question for restoring history: ordering
+        by started_at alone let a newer session mask an earlier COMPLETED one,
+        so its report_url never reached the client and the Download PDF button
+        vanished when the conversation was reopened.
+        """
+        rows = self._session.execute(
+            select(AgentSession)
+            .where(AgentSession.conversation_id == conversation_id)
+            .order_by(AgentSession.started_at.asc())
+        ).scalars().all()
+        return [AgentSessionDTO.model_validate(row) for row in rows]
+
     def create_pending(self, conversation_id: uuid.UUID, agent_id: uuid.UUID) -> AgentSessionDTO:
         """No remote_* columns are known yet at creation time."""
         row = AgentSession(

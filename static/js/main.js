@@ -130,10 +130,18 @@ document.addEventListener('DOMContentLoaded', () => {
     //   Routing comes from data-agent-key, not from display text.
     // -----------------------------------------------------------------------
     document.querySelectorAll('[data-agent-key]').forEach(el => {
-        el.addEventListener('click', (e) => {
+        el.addEventListener('click', async (e) => {
             e.stopPropagation();   // prevent generic card handler from winning
 
-            resetConversation();
+            // AWAIT. resetConversation() only assigns the new conversationId
+            // AFTER its `await fetch('/api/reset')` resolves. Called without
+            // await, this handler ran straight past it and sendMessage() below
+            // posted the autostart message with the PREVIOUS conversation id --
+            // so opening this panel wrote its first turn into whatever
+            // conversation was already open, including a completed story.
+            // Awaiting also orders the reset's own `currentAgentKey = null`
+            // BEFORE the assignment below, instead of clobbering it after.
+            await resetConversation();
             clearActiveItems();
             const card = el.closest('.capability-card, .highlight-card');
             if (card) card.classList.add('active');
@@ -157,8 +165,12 @@ document.addEventListener('DOMContentLoaded', () => {
     // Generic card handler for cards WITHOUT a dedicated data-agent-key listener.
     // §10.3: this handler must NEVER drive routing — that's the bug we fixed above.
     document.querySelectorAll('.capability-card:not([data-agent-key]), .highlight-card').forEach(card => {
-        card.addEventListener('click', () => {
-            resetConversation();
+        card.addEventListener('click', async () => {
+            // Awaited for the same reason as above: reset clears the message
+            // pane and the agent key only after its fetch resolves, so an
+            // un-awaited call lands those side effects on whatever the user
+            // does next.
+            await resetConversation();
             clearActiveItems();
             card.classList.add('active');
 
@@ -195,8 +207,12 @@ document.addEventListener('DOMContentLoaded', () => {
                     <div class="agent-desc">${agent.description}</div>
                 `;
 
-                li.addEventListener('click', () => {
-                    resetConversation();
+                li.addEventListener('click', async () => {
+                    // Awaited: without it, resetConversation()'s late
+                    // `currentAgentKey = null` overwrote the assignment below,
+                    // so the next message routed as "route me" instead of the
+                    // agent the user had just picked.
+                    await resetConversation();
                     clearActiveItems();
                     li.classList.add('active');
                     // §10.3: route by key, keep sending agent_name for backward compat
@@ -426,11 +442,24 @@ document.addEventListener('DOMContentLoaded', () => {
             chatMessages.innerHTML = '';
 
             let lastAgentName = null;
+            // Last rendered element per session, so a session's completion
+            // notice can be anchored to ITS point in the timeline rather than
+            // appended after everything -- otherwise, in a conversation that
+            // later moved to another agent, a finished story's report link
+            // would appear below that other agent's messages.
+            const lastElementBySession = new Map();
+            const agentNameBySession = new Map();
+
             data.messages.forEach(m => {
                 const type = m.role === 'assistant' ? 'agent' : 'user';
                 if (m.role === 'assistant') lastAgentName = m.agent_name;
 
                 const messageDiv = addMessage(m.content, type, m.agent_name, m.id, new Date(m.created_at));
+
+                if (m.agent_session_id) {
+                    lastElementBySession.set(m.agent_session_id, messageDiv);
+                    if (m.agent_name) agentNameBySession.set(m.agent_session_id, m.agent_name);
+                }
 
                 if (m.role === 'assistant' && m.options && m.options.length) {
                     renderOptions(m.options, messageDiv, { readOnly: true, selectedId: m.selected_option_id });
@@ -451,9 +480,34 @@ document.addEventListener('DOMContentLoaded', () => {
             // Replay the session state the transcript cannot carry. The
             // completion notice is generated, not stored, so without this a
             // reload silently dropped the report link on a finished story.
-            // Passing lastAgentName explicitly rather than leaning on the
-            // module-level `lastAgent`, which is still null on a fresh load.
-            _handleSession(data.session, lastAgentName);
+            // Agent names come from the messages rather than the module-level
+            // `lastAgent`, which is still null on a fresh load.
+            const sessions = data.sessions || [];
+
+            // EVERY finished session gets its report link back, not just the
+            // most recent one. A conversation that moved on to another agent
+            // used to hide the completed story's Download PDF button entirely.
+            sessions.forEach(s => {
+                if (s.state === 'completed' && s.report_url) {
+                    _renderCompletedUI(
+                        s,
+                        agentNameBySession.get(s.id) || lastAgentName,
+                        lastElementBySession.get(s.id) || null,
+                    );
+                }
+            });
+
+            // Only the session still in flight can be finalizing, and only one
+            // can be: polling is driven off the newest.
+            const latest = sessions[sessions.length - 1];
+            if (latest && latest.state === 'finalizing') {
+                _lastSessionId = latest.id;
+                _handleSession(latest, agentNameBySession.get(latest.id) || lastAgentName);
+            } else if (latest && latest.state !== 'completed') {
+                // An interview mid-flight: remember it so a timeout recovers
+                // via /resume instead of re-sending (§1.6).
+                _lastSessionId = latest.id;
+            }
 
             scrollToBottom();
         } catch (error) {
@@ -518,7 +572,7 @@ document.addEventListener('DOMContentLoaded', () => {
         textDiv.appendChild(link);
     }
 
-    function _renderCompletedUI(session, agentName = null) {
+    function _renderCompletedUI(session, agentName = null, anchorEl = null) {
         // Remove the "writing…" notice if still present
         const notice = document.getElementById('session-finalizing-notice');
         if (notice) notice.remove();
@@ -529,6 +583,10 @@ document.addEventListener('DOMContentLoaded', () => {
         const attribution = agentName || lastAgent;
         if (session.report_url) {
             const msg = addMessage('✅ Your story is ready.', 'system', attribution);
+            // anchorEl places the notice where the session actually ended,
+            // instead of at the bottom of a conversation that has since moved
+            // on to another agent. addMessage() appends, so this relocates it.
+            if (anchorEl) anchorEl.after(msg);
             _appendReportAction(msg, session.report_url);
         } else {
             // Report still generating — show a "checking…" message and poll
@@ -817,6 +875,10 @@ document.addEventListener('DOMContentLoaded', () => {
         addMessage('Namaste. How can I help you today?', 'system');
         lastAgent = null;
         currentAgentKey = null;
+        // Belongs to the conversation we just left. Kept, a timeout in the NEW
+        // conversation would POST /api/sessions/{old_id}/resume and recover a
+        // turn from the previous interview.
+        _lastSessionId = null;
 
         if (window.innerWidth <= 768) {
             sidebar.classList.remove('active');

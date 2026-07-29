@@ -57,20 +57,22 @@ def _general_support_agent() -> tuple[uuid.UUID, str]:
 
 def _seed_message(
     conversation_id: uuid.UUID, seq: int, role: str, content: str,
-    agent_id=None, options=None, selected_option_id=None,
+    agent_id=None, options=None, selected_option_id=None, agent_session_id=None,
 ) -> uuid.UUID:
     db = SessionLocal()
     try:
         msg_id = uuid.uuid4()
         db.execute(text("""
             INSERT INTO conversation_messages
-                (id, conversation_id, seq, role, content, agent_id, options, selected_option_id)
+                (id, conversation_id, seq, role, content, agent_id, options, selected_option_id,
+                 agent_session_id)
             VALUES
-                (:id, :conversation_id, :seq, :role, :content, :agent_id, :options, :selected_option_id)
+                (:id, :conversation_id, :seq, :role, :content, :agent_id, :options, :selected_option_id,
+                 :agent_session_id)
         """), {
             "id": msg_id, "conversation_id": conversation_id, "seq": seq, "role": role, "content": content,
             "agent_id": agent_id, "options": json.dumps(options) if options is not None else None,
-            "selected_option_id": selected_option_id,
+            "selected_option_id": selected_option_id, "agent_session_id": agent_session_id,
         })
         db.commit()
         return msg_id
@@ -285,17 +287,17 @@ def test_messages_returns_completed_session_so_a_reload_keeps_the_report_link(cl
 
     body = client.get(f"/api/conversations/{conv_id}/messages").get_json()
 
-    assert body["session"] is not None, "a reload has no other way to recover the report link"
-    assert body["session"]["id"] == str(sess_id)
-    assert body["session"]["state"] == "completed"
-    assert body["session"]["report_url"] == url
-    assert body["session"]["result_ref"] == "4119"
-    assert body["session"]["step"] == 16
+    assert body["sessions"], "a reload has no other way to recover the report link"
+    assert body["sessions"][0]["id"] == str(sess_id)
+    assert body["sessions"][0]["state"] == "completed"
+    assert body["sessions"][0]["report_url"] == url
+    assert body["sessions"][0]["result_ref"] == "4119"
+    assert body["sessions"][0]["step"] == 16
 
 
-def test_messages_returns_null_session_for_a_conversation_that_never_had_one(client, as_user):
+def test_messages_returns_an_empty_session_list_for_a_conversation_that_never_had_one(client, as_user):
     """Plain LLM conversations have no session; the key must still be present
-    and null so the client can branch on it without guarding for undefined."""
+    (an empty list) so the client can iterate without guarding for undefined."""
     user = _new_user()
     as_user(user)
     conv_id = _seed_conversation(user, "just chatting", datetime.now(timezone.utc))
@@ -303,20 +305,21 @@ def test_messages_returns_null_session_for_a_conversation_that_never_had_one(cli
 
     body = client.get(f"/api/conversations/{conv_id}/messages").get_json()
 
-    assert "session" in body
-    assert body["session"] is None
+    assert "sessions" in body
+    assert body["sessions"] == []
 
 
-def test_messages_returns_the_latest_session_not_the_first(client, as_user):
-    """A conversation can hold several sessions over its life; resuming must
-    reflect the most recent one, not whichever was inserted first."""
+def test_messages_returns_every_session_oldest_first(client, as_user):
+    """A conversation can hold several sessions over its life and the client
+    needs all of them -- returning only the newest is what hid a completed
+    story's report link behind a later agent's session."""
     user = _new_user()
     as_user(user)
     conv_id = _seed_conversation(user, "two stories", datetime.now(timezone.utc))
     agent_id, _ = _general_support_agent()
 
     older = datetime.now(timezone.utc) - timedelta(hours=2)
-    _seed_session(conv_id, agent_id, "abandoned", started_at=older)
+    older_id = _seed_session(conv_id, agent_id, "abandoned", started_at=older)
     newest_id = _seed_session(
         conv_id, agent_id, "completed", result_ref="4119",
         report_url="https://static.example.org/x.pdf",
@@ -325,8 +328,8 @@ def test_messages_returns_the_latest_session_not_the_first(client, as_user):
 
     body = client.get(f"/api/conversations/{conv_id}/messages").get_json()
 
-    assert body["session"]["id"] == str(newest_id)
-    assert body["session"]["result_ref"] == "4119"
+    assert [s["id"] for s in body["sessions"]] == [str(older_id), str(newest_id)]
+    assert body["sessions"][-1]["result_ref"] == "4119"
 
 
 def test_session_is_not_exposed_across_tenants(client, as_user):
@@ -418,3 +421,66 @@ def test_last_active_timestamp_is_not_hours_stale(client, script):
     assert row.staleness < timedelta(minutes=1), (
         f"last_message_at is {row.staleness} behind now() -- timezone skew is back"
     )
+
+
+# ---------------------------------------------------------------------------
+# The reported bug: reopening a finished story from history lost its
+# Download PDF button once another agent had been used.
+#
+# Reproduced from live data -- conversation 838dd5fe held TWO sessions:
+#   record_stories      completed      story=4122  report=YES   21:47
+#   capture_discussion  awaiting_user  story=None  report=no    22:51
+# Returning only the newest handed the client the discussion session, whose
+# state is neither 'finalizing' nor 'completed', so nothing rendered. The
+# report was never lost -- the API returned the wrong one of the two.
+# ---------------------------------------------------------------------------
+
+def test_a_later_agents_session_does_not_hide_a_completed_storys_report(client, as_user):
+    """THE regression test for the missing Download PDF button."""
+    user = _new_user()
+    as_user(user)
+    conv_id = _seed_conversation(user, "what is a learning circle", datetime.now(timezone.utc))
+    agent_id, _ = _general_support_agent()
+
+    report = "https://qa-mohini-static.example.org/chatbot/storymedia/4122/story.pdf"
+    story_id = _seed_session(
+        conv_id, agent_id, "completed", step=16, result_ref="4122", report_url=report,
+        started_at=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+    discussion_id = _seed_session(
+        conv_id, agent_id, "awaiting_user", step=2,
+        started_at=datetime.now(timezone.utc),
+    )
+
+    body = client.get(f"/api/conversations/{conv_id}/messages").get_json()
+    by_id = {s["id"]: s for s in body["sessions"]}
+
+    assert str(story_id) in by_id, (
+        "the completed story session must survive a later agent's session -- "
+        "this is exactly what made the Download PDF button disappear"
+    )
+    assert by_id[str(story_id)]["report_url"] == report
+    assert by_id[str(story_id)]["state"] == "completed"
+    # And the later session is still there, so polling/resume keeps working.
+    assert str(discussion_id) in by_id
+    assert body["sessions"][-1]["id"] == str(discussion_id), "ordered oldest first"
+
+
+def test_messages_carry_their_agent_session_id(client, as_user):
+    """The client anchors each session's completion notice to that session's
+    last message. Without this the report link renders at the very bottom,
+    below a later agent's turns."""
+    user = _new_user()
+    as_user(user)
+    conv_id = _seed_conversation(user, "anchored", datetime.now(timezone.utc))
+    agent_id, _ = _general_support_agent()
+    sess_id = _seed_session(conv_id, agent_id, "completed", result_ref="4122",
+                            report_url="https://static.example.org/x.pdf")
+
+    _seed_message(conv_id, 1, "user", "hello")
+    _seed_message(conv_id, 2, "assistant", "hi there", agent_id=agent_id, agent_session_id=sess_id)
+
+    msgs = client.get(f"/api/conversations/{conv_id}/messages").get_json()["messages"]
+
+    assert msgs[0]["agent_session_id"] is None, "user messages belong to no session"
+    assert msgs[1]["agent_session_id"] == str(sess_id)

@@ -130,9 +130,45 @@ class RouterService:
         return None
 
     @staticmethod
-    def _is_exit(text: str, exit_keywords: List[str]) -> bool:
-        lowered = text.lower()
-        return any(kw.lower() in lowered for kw in exit_keywords)
+    def _normalise_command(text: str) -> str:
+        """Lowercase, collapse whitespace, drop surrounding punctuation."""
+        stripped = (text or "").strip().strip(_COMMAND_PUNCTUATION).lower()
+        return " ".join(stripped.split())
+
+    @classmethod
+    def _is_exit(cls, text: str, exit_keywords: List[str]) -> bool:
+        """Exit only when the message IS the command -- never when it merely
+        contains it.
+
+        This was a substring test, and the effect was severe. Exit keywords
+        default to ["/exit", "cancel", "stop"] (RoutingSpec), and
+        capture_discussion inherits those bare defaults, so an ordinary
+        interview answer silently aborted the interview. Verified live against
+        the running app:
+
+            "Children stopped coming to school"        -> session abandoned
+            "The meeting was cancelled last week"      -> session abandoned
+            "We discussed the bus stop near the school"-> session abandoned
+
+        Each one abandoned the Mitra session, unpinned the conversation and
+        rerouted to the default agent, which then answered plausibly -- so the
+        user had no idea their interview had been destroyed and no report would
+        ever be produced. record_stories was hit too, via "start over" inside
+        "we had to start over".
+
+        Word-boundary matching is not enough either: "we had to stop the
+        dropouts" is a legitimate answer that contains the standalone word
+        "stop". The failure is irreversible (the session is abandoned) while a
+        miss is trivially recoverable (type the command alone, or press New
+        chat), so this deliberately biases all the way to precision.
+        """
+        normalised = cls._normalise_command(text)
+        if not normalised:
+            return False
+        return any(
+            normalised == cls._normalise_command(kw)
+            for kw in exit_keywords if kw and kw.strip()
+        )
 
     # ------------------------------------------------------------------
     # Gate 3 helper
