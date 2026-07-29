@@ -14,13 +14,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const root = document.documentElement;
 
     const BOT_AVATAR_SVG = `
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-            stroke-linecap="round" stroke-linejoin="round" width="18" height="18">
-            <rect x="3" y="10" width="18" height="10" rx="3"></rect>
-            <circle cx="8.5" cy="15" r="1.2" fill="currentColor" stroke="none"></circle>
-            <circle cx="15.5" cy="15" r="1.2" fill="currentColor" stroke="none"></circle>
-            <line x1="12" y1="10" x2="12" y2="6"></line>
-            <circle cx="12" cy="4.5" r="1.5"></circle>
+        <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-bot">
+            <path d="M12 8V4H8"/>
+            <rect width="16" height="12" x="4" y="8" rx="2"/>
+            <path d="M2 14h2"/>
+            <path d="M20 14h2"/>
+            <path d="M15 13v2"/>
+            <path d="M9 13v2"/>
         </svg>`;
 
     const AGENT_ICON_SVG = `
@@ -71,9 +71,9 @@ document.addEventListener('DOMContentLoaded', () => {
         sidebarOverlay.classList.toggle('active');
     }
 
-    if (mobileMenuBtn)        mobileMenuBtn.addEventListener('click', toggleSidebar);
-    if (mobileSidebarClose)   mobileSidebarClose.addEventListener('click', toggleSidebar);
-    if (sidebarOverlay)       sidebarOverlay.addEventListener('click', toggleSidebar);
+    if (mobileMenuBtn) mobileMenuBtn.addEventListener('click', toggleSidebar);
+    if (mobileSidebarClose) mobileSidebarClose.addEventListener('click', toggleSidebar);
+    if (sidebarOverlay) sidebarOverlay.addEventListener('click', toggleSidebar);
 
     const advancedToggle = document.getElementById('advanced-toggle');
     const advancedContent = document.getElementById('advanced-content');
@@ -303,23 +303,22 @@ document.addEventListener('DOMContentLoaded', () => {
             const contentDiv = document.createElement('div');
             contentDiv.className = 'message-content';
 
+            const textDiv = document.createElement('div');
+            textDiv.className = 'message-text';
+
             if (type === 'agent') {
-                // §10.3 change 7: SANITISE.
-                //   contentDiv.innerHTML = marked.parse(content) is an XSS path:
-                //   Mitra bot content is externally controlled and marked does NOT
-                //   escape HTML by default. DOMPurify strips any injected scripts.
-                //   Verified against design doc §13.2 risk #20.
-                contentDiv.innerHTML = DOMPurify.sanitize(marked.parse(content));
+                textDiv.innerHTML = DOMPurify.sanitize(marked.parse(content));
             } else {
-                contentDiv.textContent = content;
+                textDiv.textContent = content;
             }
-            body.appendChild(contentDiv);
+            contentDiv.appendChild(textDiv);
 
             const meta = document.createElement('div');
             meta.className = 'message-meta';
             meta.textContent = `${formatTime(timestamp)} · ${agentName || 'Home'}`;
-            body.appendChild(meta);
+            contentDiv.appendChild(meta);
 
+            body.appendChild(contentDiv);
             messageDiv.appendChild(body);
         } else if (type === 'user') {
             const body = document.createElement('div');
@@ -327,14 +326,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const contentDiv = document.createElement('div');
             contentDiv.className = 'message-content';
-            contentDiv.textContent = content;
-            body.appendChild(contentDiv);
+
+            const textDiv = document.createElement('div');
+            textDiv.className = 'message-text';
+            textDiv.textContent = content;
+            contentDiv.appendChild(textDiv);
 
             const meta = document.createElement('div');
             meta.className = 'message-meta';
             meta.textContent = formatTime(timestamp);
-            body.appendChild(meta);
+            contentDiv.appendChild(meta);
 
+            body.appendChild(contentDiv);
             messageDiv.appendChild(body);
         } else {
             // context-switch pill — no avatar/timestamp
@@ -544,7 +547,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (notice) notice.remove();
                         addMessage('Story capture could not be completed. Please try again.', 'system');
                     }
-                } catch (_) {}
+                } catch (_) { }
             }, 2000);
         } else if (session.state === 'completed') {
             _renderCompletedUI(session);
@@ -705,13 +708,27 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // -----------------------------------------------------------------------
-    // Form submit
+    // Form submit & Textarea auto-resize
     // -----------------------------------------------------------------------
+    userInput.addEventListener('input', function() {
+        this.style.height = 'auto';
+        this.style.height = (this.scrollHeight) + 'px';
+    });
+
+    userInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            chatForm.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+        }
+    });
+
     chatForm.addEventListener('submit', async (e) => {
         e.preventDefault();
         const message = userInput.value.trim();
         if (!message) return;
         addMessage(message, 'user');
         sendMessage(message);
+        
+        userInput.style.height = 'auto'; // Reset height after send
     });
 });
