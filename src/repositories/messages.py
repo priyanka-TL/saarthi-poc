@@ -88,6 +88,24 @@ class MessageRepository:
         
         return [MessageDTO.model_validate(row) for row in rows]
 
+    def last_user_content(self, conversation_id: uuid.UUID) -> Optional[str]:
+        """Text of the most recent user message, or None.
+
+        Turn recovery needs to ask Mitra "what became of THIS message", and the
+        conversation transcript is the only record of what was sent -- the turn
+        that timed out never got far enough to store anything else.
+        """
+        stmt = (
+            select(ConversationMessage.content)
+            .where(
+                ConversationMessage.conversation_id == conversation_id,
+                ConversationMessage.role == "user",
+            )
+            .order_by(ConversationMessage.seq.desc())
+            .limit(1)
+        )
+        return self._session.execute(stmt).scalar_one_or_none()
+
     def list_page(self, conversation_id: uuid.UUID, after_seq: int, limit: int) -> MessagePageDTO:
         """
         Returns a page of messages for a conversation, using keyset pagination on `seq`.

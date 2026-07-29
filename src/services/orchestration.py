@@ -14,10 +14,21 @@ from src.services.router_service import RouterService, RouteDecision
 from src.services.session_service import SessionService
 from src.services.agent_registry import AgentRegistry
 from src.agents.factory import HandlerFactory
-from src.integrations.mitra.exceptions import MitraError
+from src.integrations.mitra.exceptions import MitraError, MitraTurnTimeout
+from src.integrations.mitra.turn_recovery import Reconciliation, TurnOutcome, reconcile
+from src.agents.protocol import AgentTurn
 from src.logger import get_logger
 
 logger = get_logger("orchestration")
+
+TITLE_MAX_LEN = 60
+TITLE_TRUNCATE_AT = 57
+
+
+def _conversation_title(text: str) -> str:
+    """The conversation title is the first user message, truncated per contract
+    (<=60 chars, else 57 + an ellipsis)."""
+    return text if len(text) <= TITLE_MAX_LEN else text[:TITLE_TRUNCATE_AT] + "..."
 
 
 def _to_session_view(dto: AgentSessionDTO) -> AgentSessionView:
@@ -55,6 +66,15 @@ class TurnInput:
     text: str
     option_id: Optional[str] = None
     agent_key: Optional[str] = None
+
+@dataclass
+class ResumeResult:
+    """Outcome of POST /api/sessions/{id}/resume."""
+    outcome: TurnOutcome
+    session: Any
+    text: str = ""
+    message: Any = None
+
 
 @dataclass
 class TurnResult:
@@ -111,6 +131,15 @@ class OrchestrationService:
             conv.id, seq, role="user", content=ctx_in.text,
             selected_option_id=ctx_in.option_id, request_id=ctx_in.request_id
         )
+
+        # 3b. Title and timestamp the conversation NOW, from the user's own
+        # message, not at step 14. Step 14 only runs on a successful turn, so a
+        # turn that failed after this commit (an upstream 429, say) left the
+        # conversation titleless and with a NULL last_message_at -- it showed up
+        # in the sidebar as "New conversation / No messages yet" even though the
+        # user had clearly said something. touch() COALESCEs the title, so the
+        # first message still wins and step 14 remains harmless.
+        self._conversations.touch(conv.id, title_from=_conversation_title(ctx_in.text))
 
         # 4. route (v2: 5 gates)
         # Build partial context for router
@@ -169,7 +198,17 @@ class OrchestrationService:
             locale=locale
         )
         
-        turn = handler.handle(ctx)
+        try:
+            turn = handler.handle(ctx)
+        except MitraTurnTimeout as exc:
+            # A timeout does NOT mean the turn failed -- it means we stopped
+            # listening. Ask Mitra what actually happened before surfacing an
+            # error, because nothing else will: the late frame is discarded by
+            # _drain_stale() on the next turn, so an unrecovered reply desyncs
+            # the interview even if the user does nothing at all.
+            turn = self._recover_timed_out_turn(agent, session_view, ctx_in.text, exc)
+            if turn is None:
+                raise
 
         # 11. apply session delta; finalise if terminal
         if turn.session_delta and session_view:
@@ -206,10 +245,10 @@ class OrchestrationService:
                 request_id=ctx_in.request_id,
             )
         
-        # 14. touch conversation (set title from first user message, truncated per contract)
-        raw_title = ctx_in.text
-        title_for_conv = raw_title if len(raw_title) <= 60 else raw_title[:57] + "..."
-        self._conversations.touch(conv.id, title_from=title_for_conv)
+        # 14. refresh last_message_at now the turn actually completed. The
+        #     title was already set at step 3b and touch() COALESCEs it, so
+        #     passing it again cannot overwrite the original.
+        self._conversations.touch(conv.id, title_from=_conversation_title(ctx_in.text))
         self._db.commit()
         
         return TurnResult(
@@ -221,6 +260,121 @@ class OrchestrationService:
             session=session_view
         )
         
+    # ------------------------------------------------------------------
+    # Lost-turn recovery (see src/integrations/mitra/turn_recovery.py)
+    # ------------------------------------------------------------------
+
+    def _reconcile(self, agent, session_view, sent_text: str) -> Optional[Reconciliation]:
+        """Ask Mitra what became of ``sent_text``. None if not applicable."""
+        if self._mitra_rest is None or session_view is None:
+            return None
+        if getattr(agent.spec, "agent_type", None) != "remote_flow":
+            return None
+        if not session_view.remote_session_id or not session_view.remote_profile_id:
+            return None
+
+        rows = self._mitra_rest.recent_chat(
+            session_view.remote_session_id, session_view.remote_profile_id,
+        )
+        return reconcile(rows, sent_text)
+
+    def _recover_timed_out_turn(self, agent, session_view, sent_text, exc):
+        """Turn a MitraTurnTimeout into the reply Mitra already produced.
+
+        Returns an AgentTurn to carry on with, or None to let the timeout
+        propagate (the client then gets its 504 as before).
+        """
+        try:
+            result = self._reconcile(agent, session_view, sent_text)
+        except Exception as recovery_error:
+            # Recovery is best-effort: never let it mask the original timeout.
+            logger.warning("turn recovery failed after %s: %s", exc, recovery_error)
+            return None
+
+        if result is None or result.outcome is not TurnOutcome.ANSWERED:
+            logger.info(
+                "turn recovery: %s -- surfacing the timeout",
+                result.outcome.value if result else "not applicable",
+            )
+            return None
+
+        logger.info("turn recovery: recovered a reply Mitra had already sent (stage=%s)", result.stage)
+
+        # completion_poll_every_turn normally runs inside the handler, which
+        # never got that far. Without this an interview that COMPLETED during
+        # the timeout would never finalise.
+        done = False
+        try:
+            done = bool(
+                agent.spec.remote.completion_poll_every_turn
+                and self._mitra_rest.is_session_completed(session_view.remote_session_id)
+            )
+        except Exception as poll_error:
+            logger.warning("turn recovery: completion poll failed: %s", poll_error)
+
+        return AgentTurn(
+            text=result.bot_text,
+            # Deliberately no options: GET /api/companychat/ carries no
+            # extra_content, so choice buttons cannot be recovered. Flows that
+            # emit them degrade to text (record_stories/guided_guest never does).
+            options=[],
+            session_delta=SessionDelta(
+                state=SessionState.awaiting_user,
+                # step is left alone -- the REST payload has `stage`, not the
+                # numeric step, and step is display-only.
+                remote_session_id=session_view.remote_session_id,
+                remote_profile_id=session_view.remote_profile_id,
+                remote_flow=agent.spec.remote.flow_name,
+                remote_bot_route=session_view.remote_bot_route,
+            ),
+            terminal=done,
+        )
+
+    def resume_turn(self, session_id: uuid.UUID, user) -> Optional["ResumeResult"]:
+        """Public entry point for POST /api/sessions/{id}/resume.
+
+        The manual counterpart to _recover_timed_out_turn, for when automatic
+        recovery came back PENDING (Mitra was still generating) and the client
+        is polling. Read-only against Mitra: it never re-sends the user's turn.
+        Returns None if no such session exists so the route can 404.
+        """
+        session_view = self._sessions.get(session_id)
+        if session_view is None:
+            return None
+
+        agent = self._registry.get_by_id(str(session_view.agent_id))
+        last_user_text = self._messages.last_user_content(session_view.conversation_id)
+        if agent is None or not last_user_text:
+            return ResumeResult(outcome=TurnOutcome.NOT_DELIVERED, session=session_view)
+
+        result = self._reconcile(agent, session_view, last_user_text)
+        if result is None:
+            return ResumeResult(outcome=TurnOutcome.NOT_DELIVERED, session=session_view)
+        if result.outcome is not TurnOutcome.ANSWERED:
+            return ResumeResult(outcome=result.outcome, session=session_view)
+
+        # Persist the recovered reply so it survives a reload like any other
+        # assistant message, then mirror handle_turn's tail.
+        conv_id = session_view.conversation_id
+        msg = self._messages.insert(
+            conv_id,
+            self._conversations.next_seq_for_update(conv_id),
+            role="assistant",
+            content=result.bot_text,
+            agent_id=agent.id,
+            agent_session_id=session_view.id,
+        )
+        updated = self._sessions.apply(
+            session_view, SessionDelta(state=SessionState.awaiting_user),
+        )
+        self._conversations.touch(conv_id)
+        self._db.commit()
+
+        return ResumeResult(
+            outcome=TurnOutcome.ANSWERED, text=result.bot_text,
+            session=updated or session_view, message=msg,
+        )
+
     def finalize_now(self, session_id: uuid.UUID, user) -> Optional[Any]:
         """Public entry point for POST /api/sessions/{id}/finalize -- a forced,
         idempotent end-story call (design doc §10.2). Returns None if no such

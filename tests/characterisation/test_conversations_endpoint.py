@@ -346,3 +346,75 @@ def test_session_is_not_exposed_across_tenants(client, as_user):
 
     assert response.status_code == 404
     assert "secret.pdf" not in response.get_data(as_text=True)
+
+
+# ---------------------------------------------------------------------------
+# The recent-conversations list itself.
+#
+# Reported as "I can't see any of my conversations". Two causes, both here:
+# every "New chat" archived the conversation just finished (and archived rows
+# are excluded), and empty shells crowded out the real ones.
+# ---------------------------------------------------------------------------
+
+def test_finished_conversations_stay_in_the_list_after_starting_a_new_chat(client, script):
+    """THE regression test for the empty sidebar.
+
+    /api/reset used to archive the conversation being left, so the list could
+    never show more than the one in progress -- everything the user had already
+    finished disappeared the moment they clicked New chat.
+    """
+    from tests.characterisation.conftest import DEFAULT_AGENT, chat
+
+    titles = ["first question", "second question", "third question"]
+    for title in titles:
+        script.queue("ok")
+        chat(client, title, DEFAULT_AGENT)
+        client.post("/api/reset")
+
+    body = client.get("/api/conversations?limit=5").get_json()
+    listed = [c["title"] for c in body["conversations"]]
+
+    assert listed == list(reversed(titles)), (
+        f"every finished conversation must remain listed, newest first; got {listed}"
+    )
+
+
+def test_empty_conversations_do_not_take_up_slots_in_the_list(client, script):
+    """A reset leaves behind a conversation nobody typed into. Listing those
+    shows 'New conversation / No messages yet' rows that push real history out
+    of the top 5."""
+    from tests.characterisation.conftest import DEFAULT_AGENT, chat
+
+    script.queue("ok")
+    chat(client, "a real conversation", DEFAULT_AGENT)
+    client.post("/api/reset")          # leaves an empty conversation behind
+    client.post("/api/reset")          # and another
+
+    body = client.get("/api/conversations?limit=5").get_json()
+
+    assert [c["title"] for c in body["conversations"]] == ["a real conversation"]
+
+
+def test_last_active_timestamp_is_not_hours_stale(client, script):
+    """last_message_at was written with a naive utcnow() into a timestamptz
+    column, so Postgres read it in the server's zone and stored every
+    conversation hours in the past -- the sidebar said "Last active 5 hours
+    ago" about a chat that had just happened."""
+    from tests.characterisation.conftest import DEFAULT_AGENT, chat
+
+    script.queue("ok")
+    chat(client, "just now", DEFAULT_AGENT)
+
+    db = SessionLocal()
+    try:
+        row = db.execute(text("""
+            SELECT now() - last_message_at AS staleness
+            FROM conversations WHERE title = 'just now'
+        """)).fetchone()
+    finally:
+        db.close()
+
+    assert row is not None
+    assert row.staleness < timedelta(minutes=1), (
+        f"last_message_at is {row.staleness} behind now() -- timezone skew is back"
+    )

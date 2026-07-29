@@ -99,11 +99,19 @@ def test_reset_mid_interview_abandons_session_and_closes_channel(client, script,
 
 
 def test_reset_returns_success(client):
-    """app.py:109-113."""
+    """app.py:109-113, plus the conversation_id added when reset stopped
+    archiving the previous conversation.
+
+    The id is not decorative: the client must adopt it. Reset used to archive
+    the old conversation so a null conversation_id could only resolve to a new
+    one -- but archiving is what hid finished chats from the recent list, so
+    the previous conversation now stays active and a null id would resume it."""
     response = client.post("/api/reset")
 
     assert response.status_code == 200
-    assert response.get_json() == {"status": "success"}
+    body = response.get_json()
+    assert body["status"] == "success"
+    uuid.UUID(body["conversation_id"])   # present and a real uuid
 
 
 def test_reset_accepts_an_empty_body(client):
@@ -160,7 +168,12 @@ def test_reset_drops_history_from_subsequent_llm_calls(client, script):
 
 
 def test_reset_is_idempotent(client):
+    seen = []
     for _ in range(3):
         response = client.post("/api/reset")
         assert response.status_code == 200
-        assert response.get_json() == {"status": "success"}
+        body = response.get_json()
+        assert body["status"] == "success"
+        seen.append(body["conversation_id"])
+
+    assert len(set(seen)) == 3, "each reset must hand back a distinct conversation"

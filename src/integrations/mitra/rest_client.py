@@ -70,6 +70,7 @@ from src.integrations.mitra.exceptions import (
     MitraRedirectError,
     MitraSSRFError,
 )
+from src.integrations.mitra.turn_recovery import ChatRow
 
 FINALIZE_V1_PATH = "/api/end-story/"
 FINALIZE_V2_PATH = "/api/end-story/v2/"
@@ -200,6 +201,49 @@ class MitraRestClient:
         if not results:
             return False
         return results[-1].get("status") == "COMPLETED"
+
+    def recent_chat(
+        self, session_id: str, profile_id: str, tail: int = 10
+    ) -> list[ChatRow]:
+        """Return the last ``tail`` CompanyChat rows, oldest first.
+
+        Used to reconcile a turn Saarthi stopped listening for, without
+        re-sending it (see turn_recovery).
+
+        PAGINATION MATTERS HERE. Mitra uses LimitOffsetPagination with
+        PAGE_SIZE=100 (settings.py:430), so a bare GET returns the FIRST 100
+        rows -- the oldest ones. Reading ``results[-1]`` off that page silently
+        stops being "the latest message" once an interview passes 100 rows, so
+        this asks for ``count`` first and then offsets to the true tail.
+
+        Direction comes from ``sender.id`` vs the caller's own profile id rather
+        than a hardcoded AI profile, so it stays correct across environments.
+        """
+        head = self._request(
+            "GET", "/api/companychat/", params={"session": session_id, "limit": 1},
+        )
+        count = int(head.get("count") or 0)
+        if count == 0:
+            return []
+
+        offset = max(0, count - tail)
+        page = self._request(
+            "GET", "/api/companychat/",
+            params={"session": session_id, "limit": tail, "offset": offset},
+        )
+
+        rows: list[ChatRow] = []
+        for raw in page.get("results", []):
+            sender_id = str(((raw.get("sender") or {}).get("id", "")))
+            rows.append(ChatRow(
+                id=int(raw.get("id") or 0),
+                from_user=(sender_id == str(profile_id)),
+                message=str(raw.get("message") or ""),
+                translated_message=str(raw.get("translated_message") or ""),
+                stage=str(raw.get("stage") or ""),
+            ))
+        rows.sort(key=lambda r: r.id)
+        return rows
 
     def finalize(
         self,

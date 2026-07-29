@@ -189,6 +189,7 @@ class MitraChannel:
             options: List[ParsedOption] = []
             step: Optional[int] = None
             saw_control_payload = False
+            heard_from_bot = False
             deadline = time.monotonic() + timeout_s
             last_rx = time.monotonic()
 
@@ -196,9 +197,33 @@ class MitraChannel:
                 if self._closed.is_set():
                     raise MitraChannelClosed(self._close_reason)
 
-                remaining = min(deadline - time.monotonic(), last_rx + idle_gap_s - time.monotonic())
+                # THE IDLE GAP ONLY APPLIES ONCE THE BOT HAS STARTED SPEAKING.
+                #
+                # It is a "fragments stopped arriving, flush what we have"
+                # backstop (§1.3) -- a gap BETWEEN fragments. Applying it from
+                # send time instead turned it into a hard deadline on Mitra's
+                # FIRST token, far stricter than the configured turn timeout:
+                # with idle_gap_ms=8000 / turn_timeout_ms=45000, a reply that
+                # took 8.4s raised MitraTurnTimeout at 19% of the real budget.
+                # Verified against Mitra's own CompanyChat rows -- the turn had
+                # actually succeeded upstream; only this side stopped listening,
+                # and the user's Retry then re-sent the answer into the NEXT
+                # question. Most turns land in 2-6s, which is why it presented
+                # as intermittent.
+                #
+                # Note `last_rx` is only advanced for source == "bot" below, so
+                # the user-echo Mitra sends back immediately (§1.2) does not
+                # extend the window -- the old expression really was measuring
+                # from send time.
+                remaining = deadline - time.monotonic()
+                if heard_from_bot:
+                    remaining = min(remaining, last_rx + idle_gap_s - time.monotonic())
+
                 if remaining <= 0:
-                    if chunks:
+                    # saw_control_payload: we DID hear from Mitra, its frame was
+                    # just unusable (§Defect 4). Falling through to the
+                    # re-prompt below is honest; "the request timed out" is not.
+                    if chunks or saw_control_payload:
                         break  # idle-gap (or timeout) flush
                     raise MitraTurnTimeout(step=step)
 
@@ -213,6 +238,7 @@ class MitraChannel:
                     continue
 
                 last_rx = time.monotonic()
+                heard_from_bot = True
                 if f.control_payload:
                     # Mitra leaked an internal LLM object instead of a reply
                     # (frame_parser §Defect 4). The parser has already stripped

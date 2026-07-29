@@ -28,6 +28,86 @@ os.environ["LLM_MAX_RETRIES"] = "1"
 os.environ["LOG_LEVEL"] = "ERROR"
 
 # ---------------------------------------------------------------------------
+# 1b. DATABASE_URL --> A DEDICATED TEST DATABASE. NON-NEGOTIABLE.
+#
+#     The reset_state fixture below runs an UNSCOPED `DELETE FROM conversations`
+#     before every test that touches the app. It has to: those tests act as the
+#     static-token user, so leftover conversations for that identity would leak
+#     between them. But `.env`'s DATABASE_URL points at the DEVELOPMENT database
+#     -- the one the running app uses -- so `pytest` silently destroyed real
+#     chat history, every run. That is how a user's conversations disappeared.
+#
+#     Redirecting here (rather than asking developers to remember an env var)
+#     is what makes the destructive fixture safe by construction. Same override
+#     trick as the keys above: os.environ beats settings' .env file, and this
+#     runs before src.settings is first imported.
+#
+#     MUST stay above the `import src.llm` below -- that import instantiates
+#     Settings(), which snapshots the environment as it is at that moment.
+# ---------------------------------------------------------------------------
+TEST_DB_SUFFIX = "_test"
+
+
+def _derive_test_database_url() -> str:
+    """Return the dev DATABASE_URL with `_test` appended to the database name."""
+    from urllib.parse import urlparse, urlunparse
+
+    from dotenv import dotenv_values
+
+    dev_url = os.environ.get("DATABASE_URL") or dotenv_values(
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+    ).get("DATABASE_URL")
+
+    if not dev_url:
+        return ""
+
+    parsed = urlparse(dev_url)
+    name = parsed.path.lstrip("/")
+    if name.endswith(TEST_DB_SUFFIX):
+        return dev_url
+    return urlunparse(parsed._replace(path=f"/{name}{TEST_DB_SUFFIX}"))
+
+
+def _ensure_test_database(url: str) -> None:
+    """CREATE DATABASE (if absent) and migrate it to head.
+
+    Runs once per pytest process. Without this, redirecting the URL would just
+    trade a data-loss bug for a "database does not exist" failure.
+    """
+    from urllib.parse import urlparse, urlunparse
+
+    import sqlalchemy as sa
+
+    parsed = urlparse(url)
+    db_name = parsed.path.lstrip("/")
+    admin_url = urlunparse(parsed._replace(path="/postgres"))
+
+    admin_engine = sa.create_engine(admin_url, isolation_level="AUTOCOMMIT")
+    with admin_engine.connect() as conn:
+        exists = conn.execute(
+            sa.text("SELECT 1 FROM pg_database WHERE datname = :n"), {"n": db_name}
+        ).scalar()
+        if not exists:
+            # Identifier cannot be bound as a parameter; db_name is derived from
+            # our own config, not from user input.
+            conn.execute(sa.text(f'CREATE DATABASE "{db_name}"'))
+    admin_engine.dispose()
+
+    from alembic import command
+    from alembic.config import Config
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cfg = Config(os.path.join(repo_root, "alembic.ini"))
+    cfg.set_main_option("script_location", os.path.join(repo_root, "migrations"))
+    command.upgrade(cfg, "head")
+
+
+_TEST_DATABASE_URL = _derive_test_database_url()
+if _TEST_DATABASE_URL:
+    os.environ["DATABASE_URL"] = _TEST_DATABASE_URL
+    _ensure_test_database(_TEST_DATABASE_URL)
+
+# ---------------------------------------------------------------------------
 # 2. Install the stub BEFORE any src.agents.* import.
 #
 #    Importing src.llm pulls in src.settings and src.logger only --- not src.agents
@@ -130,6 +210,19 @@ def reset_globals(request):
         from src.settings import settings
         from src.db.engine import SessionLocal
         from sqlalchemy import text
+
+        # LAST LINE OF DEFENCE. This DELETE is unscoped, so pointing it at a
+        # real database wipes real chat history -- which is exactly what
+        # happened before section 1b redirected DATABASE_URL. Assert the target
+        # instead of trusting it: a misconfigured URL must fail the suite, never
+        # quietly destroy data.
+        db_name = (settings.database_url or "").rsplit("/", 1)[-1].split("?")[0]
+        assert db_name.endswith(TEST_DB_SUFFIX), (
+            f"refusing to DELETE FROM conversations in database {db_name!r} -- "
+            f"the test suite must run against a *{TEST_DB_SUFFIX} database. "
+            "Check tests/conftest.py section 1b."
+        )
+
         with SessionLocal() as db_session:
             db_session.execute(text("DELETE FROM conversation_messages;"))
             db_session.execute(text("DELETE FROM conversations;"))

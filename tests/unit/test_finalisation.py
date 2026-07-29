@@ -6,7 +6,8 @@ import pytest
 
 from src.agents.protocol import AgentSessionView, SessionDelta, SessionState
 from src.domain.sessions import AgentSessionDTO
-from src.integrations.mitra.exceptions import MitraSSRFError
+from src.integrations.mitra.exceptions import MitraError, MitraSSRFError, MitraTurnTimeout
+from src.integrations.mitra.turn_recovery import ChatRow
 from src.services.orchestration import OrchestrationService
 from src.services.session_service import SessionService
 
@@ -375,3 +376,102 @@ class TestConcurrentFinalisation:
         apply_call = sessions_svc.apply.call_args
         delta: SessionDelta = apply_call[0][1]
         assert delta.report_url is None
+
+
+# ---------------------------------------------------------------------------
+# Automatic recovery of a turn Saarthi stopped listening for.
+#
+# A MitraTurnTimeout does not mean the turn failed. Verified live: Mitra
+# answered in 8.4s and only this side gave up. Without recovery the reply is
+# lost even if the user does nothing -- MitraChannel._drain_stale() discards it
+# at the start of the next turn -- so the interview desyncs silently.
+# ---------------------------------------------------------------------------
+
+class TestTimedOutTurnRecovery:
+
+    SENT = "The improvement was implemented in Melur village, Madurai district, Tamil Nadu."
+    REPLY = "What was the main problem you noticed in your school or community?"
+
+    def _orch_and_agent(self, rows, completed=False):
+        agent = _make_agent()
+        agent.spec.agent_type = "remote_flow"
+        agent.spec.remote.completion_poll_every_turn = True
+
+        mitra_rest = MagicMock()
+        mitra_rest.recent_chat.return_value = rows
+        mitra_rest.is_session_completed.return_value = completed
+
+        orch = _make_orch(mitra_rest=mitra_rest)
+        session = _session_dto()
+        return orch, agent, session, mitra_rest
+
+    def test_answered_turn_is_recovered_instead_of_surfacing_a_timeout(self):
+        rows = [
+            ChatRow(id=1, from_user=True, message=self.SENT),
+            ChatRow(id=2, from_user=False, message=self.REPLY),
+        ]
+        orch, agent, session, mitra_rest = self._orch_and_agent(rows)
+
+        turn = orch._recover_timed_out_turn(agent, session, self.SENT, MitraTurnTimeout())
+
+        assert turn is not None, "the reply Mitra already sent must not be thrown away"
+        assert turn.text == self.REPLY
+        assert turn.session_delta.state == SessionState.awaiting_user
+        # Nothing was re-sent: recovery is read-only against Mitra.
+        assert mitra_rest.recent_chat.called
+
+    def test_recovery_never_re_sends_the_users_turn(self):
+        """The whole point. A re-send lands against the NEXT question (§1.6)."""
+        rows = [
+            ChatRow(id=1, from_user=True, message=self.SENT),
+            ChatRow(id=2, from_user=False, message=self.REPLY),
+        ]
+        orch, agent, session, mitra_rest = self._orch_and_agent(rows)
+
+        orch._recover_timed_out_turn(agent, session, self.SENT, MitraTurnTimeout())
+
+        for forbidden in ("send_and_await_turn", "send", "post"):
+            assert not hasattr(mitra_rest, forbidden) or not getattr(mitra_rest, forbidden).called
+
+    def test_still_pending_lets_the_timeout_propagate(self):
+        """Mitra has the message but no answer yet -- the client must see the
+        timeout and poll, not receive an empty turn."""
+        rows = [ChatRow(id=1, from_user=True, message=self.SENT)]
+        orch, agent, session, _ = self._orch_and_agent(rows)
+
+        assert orch._recover_timed_out_turn(agent, session, self.SENT, MitraTurnTimeout()) is None
+
+    def test_not_delivered_lets_the_timeout_propagate(self):
+        orch, agent, session, _ = self._orch_and_agent([])
+
+        assert orch._recover_timed_out_turn(agent, session, self.SENT, MitraTurnTimeout()) is None
+
+    def test_completion_is_still_polled_so_a_finished_story_finalises(self):
+        """completion_poll_every_turn normally runs inside the handler, which
+        never got that far. Skipping it would strand an interview that reached
+        COMPLETED during the timeout -- it would never finalise."""
+        rows = [
+            ChatRow(id=1, from_user=True, message=self.SENT),
+            ChatRow(id=2, from_user=False, message=self.REPLY),
+        ]
+        orch, agent, session, _ = self._orch_and_agent(rows, completed=True)
+
+        turn = orch._recover_timed_out_turn(agent, session, self.SENT, MitraTurnTimeout())
+
+        assert turn.terminal is True
+
+    def test_a_failing_recovery_never_masks_the_original_timeout(self):
+        """Best-effort: if Mitra is unreachable the user must still get the
+        timeout, not a confusing secondary error."""
+        orch, agent, session, mitra_rest = self._orch_and_agent([])
+        mitra_rest.recent_chat.side_effect = MitraError("mitra unreachable")
+
+        assert orch._recover_timed_out_turn(agent, session, self.SENT, MitraTurnTimeout()) is None
+
+    def test_llm_agents_are_not_reconciled(self):
+        """Only remote_flow has server-side state at Mitra to reconcile with."""
+        orch, agent, session, mitra_rest = self._orch_and_agent([])
+        agent.spec.agent_type = "llm"
+
+        assert orch._recover_timed_out_turn(agent, session, self.SENT, MitraTurnTimeout()) is None
+        assert not mitra_rest.recent_chat.called

@@ -586,3 +586,97 @@ def test_repr_does_not_expose_origin():
         "Origin credential must not appear in repr (it would leak into logs)"
     )
     assert "MitraRestClient" in r
+
+
+# ---------------------------------------------------------------------------
+# 10. recent_chat — the tail of CompanyChat, for lost-turn recovery
+# ---------------------------------------------------------------------------
+
+def _chat_row(row_id, sender_id, message, stage="IN_PROGRESS"):
+    return {
+        "id": row_id,
+        "sender": {"id": sender_id},
+        "receiver": {"id": 1 if sender_id != 1 else 380},
+        "message": message,
+        "translated_message": "",
+        "stage": stage,
+    }
+
+
+@resp_lib.activate
+def test_recent_chat_marks_direction_from_the_callers_profile_id():
+    """A row is the USER's when sender.id is the caller's profile. Keying off a
+    hardcoded AI profile id instead would silently invert on an environment
+    where that row differs."""
+    resp_lib.add(
+        resp_lib.GET, f"{BASE_URL}/api/companychat/",
+        json={"count": 2, "results": [_chat_row(1, 380, "hi")]},
+    )
+    resp_lib.add(
+        resp_lib.GET, f"{BASE_URL}/api/companychat/",
+        json={"count": 2, "results": [
+            _chat_row(1, 380, "my answer"),
+            _chat_row(2, 1, "the bot reply"),
+        ]},
+    )
+
+    rows = _client().recent_chat("sess-1", profile_id="380")
+
+    assert [r.from_user for r in rows] == [True, False]
+    assert [r.message for r in rows] == ["my answer", "the bot reply"]
+
+
+@resp_lib.activate
+def test_recent_chat_offsets_to_the_true_tail_of_a_long_interview():
+    """Mitra paginates at PAGE_SIZE=100 with LimitOffsetPagination, so a bare
+    GET returns the OLDEST 100 rows. Reading results[-1] off that page stops
+    being 'the latest message' the moment an interview passes 100 rows -- a
+    60-turn story is 120+ rows, well past it.
+    """
+    resp_lib.add(
+        resp_lib.GET, f"{BASE_URL}/api/companychat/",
+        json={"count": 137, "results": [_chat_row(1, 380, "oldest")]},
+    )
+    resp_lib.add(
+        resp_lib.GET, f"{BASE_URL}/api/companychat/",
+        json={"count": 137, "results": [_chat_row(136, 380, "newest user"),
+                                        _chat_row(137, 1, "newest bot")]},
+    )
+
+    rows = _client().recent_chat("sess-1", profile_id="380", tail=10)
+
+    tail_request = resp_lib.calls[1].request
+    assert "offset=127" in tail_request.url, (
+        f"expected an offset to the tail (137-10), got {tail_request.url}"
+    )
+    assert "limit=10" in tail_request.url
+    assert [r.id for r in rows] == [136, 137]
+
+
+@resp_lib.activate
+def test_recent_chat_returns_rows_oldest_first():
+    """reconcile() scans a chronological list; an out-of-order page would make
+    it pair the wrong reply with the wrong message."""
+    resp_lib.add(
+        resp_lib.GET, f"{BASE_URL}/api/companychat/",
+        json={"count": 3, "results": [_chat_row(1, 380, "a")]},
+    )
+    resp_lib.add(
+        resp_lib.GET, f"{BASE_URL}/api/companychat/",
+        json={"count": 3, "results": [_chat_row(3, 1, "c"),
+                                      _chat_row(1, 380, "a"),
+                                      _chat_row(2, 1, "b")]},
+    )
+
+    assert [r.id for r in _client().recent_chat("s", "380")] == [1, 2, 3]
+
+
+@resp_lib.activate
+def test_recent_chat_on_an_empty_session_makes_no_second_call():
+    resp_lib.add(
+        resp_lib.GET, f"{BASE_URL}/api/companychat/",
+        json={"count": 0, "results": []},
+    )
+
+    assert _client().recent_chat("sess-1", "380") == []
+    assert len(resp_lib.calls) == 1

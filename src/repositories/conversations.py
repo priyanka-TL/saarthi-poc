@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from src.db.models import Conversation, ConversationStatusEnum
@@ -27,12 +27,18 @@ class ConversationRepository:
                 Conversation.external_user_id == user.user_id,
             )
         else:
-            # Resolve the most recent active conversation for the user
+            # Resolve the most recent active conversation for the user.
+            # COALESCE for the same reason as list_for_user: nullslast() sent a
+            # freshly created, not-yet-touched conversation to the BOTTOM, so
+            # "continue where I left off" could resolve to an older thread
+            # instead of the current one.
             stmt = select(Conversation).where(
                 Conversation.tenant_code == user.tenant_code,
                 Conversation.external_user_id == user.user_id,
                 Conversation.status == ConversationStatusEnum.active
-            ).order_by(Conversation.last_message_at.desc().nullslast()).limit(1)
+            ).order_by(
+                func.coalesce(Conversation.last_message_at, Conversation.created_at).desc()
+            ).limit(1)
 
         conv = self._session.execute(stmt).scalar_one_or_none()
         if conv:
@@ -51,6 +57,32 @@ class ConversationRepository:
         )
         self._session.add(new_conv)
         self._session.flush() # flush to get defaults like created_at populated by db
+        self._session.refresh(new_conv)
+        return ConversationDTO.model_validate(new_conv)
+
+    def create_new(self, user: UserContext) -> ConversationDTO:
+        """Unconditionally start a fresh conversation.
+
+        get_or_create(None) deliberately RESUMES the most recent active
+        conversation, so /api/reset could only force a new one by archiving the
+        old one first -- and archived conversations are excluded from the recent
+        list. Every "New chat" therefore hid the conversation the user had just
+        finished, which is why the sidebar could never show more than the
+        current one. This gives reset a way to start fresh without erasing
+        history from the list.
+        """
+        new_conv = Conversation(
+            id=uuid.uuid4(),
+            tenant_code=user.tenant_code,
+            organization_id=user.active_org_id,
+            external_user_id=user.user_id,
+            locale=user.locale,
+            status=ConversationStatusEnum.active,
+            message_count=0,
+            metadata_={},
+        )
+        self._session.add(new_conv)
+        self._session.flush()
         self._session.refresh(new_conv)
         return ConversationDTO.model_validate(new_conv)
 
@@ -84,30 +116,24 @@ class ConversationRepository:
         """
         Updates last_message_at and optionally sets the title if it's currently null.
         """
-        values_to_update = {"last_message_at": datetime.utcnow()}
-        
+        # func.now(), NOT datetime.utcnow(). last_message_at is timestamptz and
+        # utcnow() returns a NAIVE datetime, which Postgres interprets in the
+        # server's TimeZone -- on an Asia/Kolkata server that stored every
+        # conversation 5h30m in the PAST. Visible as "Last active 5 hours ago"
+        # on a chat that just happened, and it mis-sorts the recent list against
+        # created_at (whose server_default is now(), i.e. correct). Measured
+        # skew on the dev database: 5:29:59.99.
+        values_to_update = {"last_message_at": func.now()}
+
         if title_from:
-            # We want to set title only if it is currently None.
-            # We can do this safely in SQL using COALESCE or just by reading/writing,
-            # but since we want no transactions opened here, a single UPDATE with a condition
-            # or a CASE statement is best.
+            # COALESCE keeps the FIRST title this conversation ever got -- the
+            # title is set once and never replaced.
             stmt = (
                 update(Conversation)
                 .where(Conversation.id == id)
                 .values(
                     last_message_at=values_to_update["last_message_at"],
-                    title=select(Conversation.title).where(Conversation.id == id).scalar_subquery().op("COALESCE")(title_from[:50])
-                    # Wait, COALESCE(title, :title_from) is easier:
-                )
-            )
-            # Actually, simpler:
-            from sqlalchemy import func
-            stmt = (
-                update(Conversation)
-                .where(Conversation.id == id)
-                .values(
-                    last_message_at=values_to_update["last_message_at"],
-                    title=func.coalesce(Conversation.title, title_from)
+                    title=func.coalesce(Conversation.title, title_from),
                 )
             )
         else:
@@ -159,11 +185,25 @@ class ConversationRepository:
         stmt = select(Conversation).where(
             Conversation.tenant_code == user.tenant_code,
             Conversation.external_user_id == user.user_id,
-            Conversation.status == ConversationStatusEnum.active
-        ).order_by(Conversation.last_message_at.desc().nullslast())
+            Conversation.status == ConversationStatusEnum.active,
+            # Empty shells are not history. get_or_create() makes a row per turn
+            # attempt, so a failed turn (or a "New chat" nobody typed into)
+            # leaves a 0-message conversation behind. Listed, they render as
+            # "New conversation / No messages yet" and push real conversations
+            # out of the top 5.
+            Conversation.message_count > 0,
+        ).order_by(
+            # COALESCE, because last_message_at is only set by touch() at the
+            # END of a successful turn. A conversation whose turn errored after
+            # the user's message was committed keeps a NULL here and sorted to
+            # the very bottom, below conversations far older than it.
+            func.coalesce(Conversation.last_message_at, Conversation.created_at).desc()
+        )
 
         if cursor:
-            stmt = stmt.where(Conversation.last_message_at < cursor)
+            stmt = stmt.where(
+                func.coalesce(Conversation.last_message_at, Conversation.created_at) < cursor
+            )
 
         # Fetch limit + 1 to check if there is a next page
         stmt = stmt.limit(limit + 1)
@@ -175,7 +215,10 @@ class ConversationRepository:
         
         next_cursor = None
         if has_next and page_rows:
-            next_cursor = page_rows[-1].last_message_at
+            # Must match the ORDER BY/WHERE expression above, or paging past a
+            # NULL last_message_at would skip rows.
+            last = page_rows[-1]
+            next_cursor = last.last_message_at or last.created_at
 
         return ConversationPageDTO(
             conversations=[ConversationDTO.model_validate(row) for row in page_rows],

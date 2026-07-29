@@ -619,16 +619,78 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const retryBtn = document.createElement('button');
         retryBtn.className = 'retry-btn';
-        retryBtn.textContent = 'Retry';
-        retryBtn.addEventListener('click', () => {
-            wrapper.remove();
-            sendMessage(retryText);
-        });
+
+        // RE-SENDING IS ONLY SAFE WITHOUT A REMOTE SESSION.
+        //
+        // An LLM agent holds no server-side conversation state, so re-posting
+        // the same text is harmless. A remote_flow interview is the opposite:
+        // Mitra may already have recorded the answer and moved to the next
+        // question, so a re-send lands against the WRONG question and destroys
+        // the real answer (§1.6). That is what happened live -- Mitra had
+        // replied in 8.4s and only Saarthi stopped listening.
+        //
+        // With a session, ask the server what actually happened instead.
+        if (_lastSessionId) {
+            retryBtn.textContent = 'Check for reply';
+            retryBtn.addEventListener('click', () => {
+                _resumeSession(_lastSessionId, retryBtn, wrapper, retryText);
+            });
+        } else {
+            retryBtn.textContent = 'Retry';
+            retryBtn.addEventListener('click', () => {
+                wrapper.remove();
+                sendMessage(retryText);
+            });
+        }
         body.appendChild(retryBtn);
 
         wrapper.appendChild(body);
         chatMessages.appendChild(wrapper);
         scrollToBottom();
+    }
+
+    // Recover a turn the server stopped listening for. Read-only against
+    // Mitra: it never re-submits the user's answer. Only the explicit
+    // can_resend outcome -- Mitra has no record of the message -- allows that.
+    async function _resumeSession(sessionId, btn, wrapper, retryText, attempt = 0) {
+        const MAX_ATTEMPTS = 10;
+        btn.disabled = true;
+        btn.textContent = 'Checking…';
+
+        try {
+            const res = await fetch(`/api/sessions/${sessionId}/resume`, { method: 'POST' });
+            const data = await res.json();
+
+            if (res.status === 200 && data.outcome === 'answered') {
+                wrapper.remove();
+                addMessage(data.response, 'agent', lastAgent);
+                if (data.session) _handleSession(data.session, lastAgent);
+                return;
+            }
+
+            if (res.status === 202 && attempt < MAX_ATTEMPTS) {
+                // Mitra is still generating -- keep waiting, never re-send.
+                setTimeout(
+                    () => _resumeSession(sessionId, btn, wrapper, retryText, attempt + 1),
+                    (data.retry_after || 3) * 1000,
+                );
+                return;
+            }
+
+            if (data.can_resend) {
+                // Mitra has no record of the message, so re-sending is safe.
+                wrapper.remove();
+                sendMessage(retryText);
+                return;
+            }
+
+            btn.disabled = false;
+            btn.textContent = 'Check again';
+        } catch (error) {
+            console.error('Failed to resume session:', error);
+            btn.disabled = false;
+            btn.textContent = 'Check again';
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -638,6 +700,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // Track last sent text for the Retry button (UPSTREAM_TIMEOUT is safe to retry
     // because the session persists in awaiting_user — §10.3 change 6).
     let _lastSentText = '';
+    // Id of the remote_flow session in play, if any. Its PRESENCE is what makes
+    // a blind re-send unsafe -- see _renderErrorWithRetry.
+    let _lastSessionId = null;
 
     async function sendMessage(text, optionId = null) {
         if (!text || !text.trim()) return;
@@ -691,6 +756,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 // §10.3 change 5: react to session state
                 if (data.session) {
+                    // Remembered so a later timeout knows a remote interview is
+                    // in play and must never be recovered by re-sending.
+                    _lastSessionId = data.session.id;
                     _handleSession(data.session);
                 }
             } else {
@@ -719,15 +787,31 @@ document.addEventListener('DOMContentLoaded', () => {
     async function resetConversation() {
         _clearSessionPoll();
 
+        // Adopt the conversation the server just created. Clearing the id and
+        // letting the next turn resolve "most recent active" was only safe
+        // while reset archived the old conversation; it no longer does (that
+        // archiving is what hid finished chats from the sidebar), so the new
+        // id has to be explicit or the next message reopens the old thread.
+        let newConversationId = null;
         try {
-            await fetch('/api/reset', { method: 'POST' });
+            const res = await fetch('/api/reset', { method: 'POST' });
+            if (res.ok) {
+                newConversationId = (await res.json()).conversation_id || null;
+            }
         } catch (error) {
             console.error('Failed to reset conversation:', error);
         }
 
-        // §10.3 change 1: clear conversation identity on reset
-        conversationId = null;
-        sessionStorage.removeItem('saarthi_cid');
+        conversationId = newConversationId;
+        if (newConversationId) {
+            sessionStorage.setItem('saarthi_cid', newConversationId);
+        } else {
+            sessionStorage.removeItem('saarthi_cid');
+        }
+
+        // The chat just moved to a new conversation, so the previous one is now
+        // history -- refresh the sidebar instead of waiting for a page reload.
+        loadRecentConversations();
 
         chatMessages.innerHTML = '';
         addMessage('Namaste. How can I help you today?', 'system');

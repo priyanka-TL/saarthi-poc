@@ -168,23 +168,34 @@ def reset():
     req_conv_id = uuid.UUID(conversation_id_str) if conversation_id_str else None
     
     svc = ConversationService(g.db_session)
-    # 1. Resolve current active (or specified) conversation
-    conv = svc.resolve(req_conv_id, g.user)
+    # 1. Find the conversation being left, WITHOUT creating one. resolve() is
+    #    get_or_create: on a first-ever reset it would materialise an empty
+    #    conversation purely to abandon nothing, and step 2 then creates a
+    #    second one -- two empty rows per reset, and the stray one competes to
+    #    be "most recent active" on the next turn.
+    conv = svc.find_current(req_conv_id, g.user)
 
-    # Abandon any open session and close its Mitra channel BEFORE archiving --
+    # Abandon any open session and close its Mitra channel BEFORE moving on --
     # otherwise a reset mid-interview orphans the socket and the story is
     # never finalized (design doc §10.2).
     container = current_app.config["CONTAINER"]
-    abandoned = SessionService(g.db_session).abandon(conv.id, reason="reset", actor=g.user.user_id)
-    if abandoned is not None and container.mitra_sessions is not None:
-        container.mitra_sessions.close(conv.id)
+    if conv is not None:
+        abandoned = SessionService(g.db_session).abandon(conv.id, reason="reset", actor=g.user.user_id)
+        if abandoned is not None and container.mitra_sessions is not None:
+            container.mitra_sessions.close(conv.id)
 
-    # 2. Archive it
-    svc.reset(conv.id)
-    
-    # 3. Create a new one
-    new_conv = svc.resolve(None, g.user) # Since we just archived the old one, this creates a new active one
-    
+    # 2. Start a fresh conversation, LEAVING THE PREVIOUS ONE IN HISTORY.
+    #    It used to be archived here -- that was the only way the follow-up
+    #    resolve(None) would create a new conversation instead of resuming the
+    #    old one. But GET /api/conversations excludes archived rows, so every
+    #    "New chat" quietly erased the chat the user had just finished, and the
+    #    sidebar could never show more than the current conversation.
+    new_conv = svc.start_new(g.user)
+
+    # 3. Return the new id. The client used to send conversation_id=null on the
+    #    next turn and let the server pick "most recent active" -- now that the
+    #    previous conversation is still active, that guess would resume it.
     return jsonify({
-        "status": "success"
+        "status": "success",
+        "conversation_id": str(new_conv.id),
     })

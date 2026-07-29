@@ -364,3 +364,115 @@ def test_silence_still_times_out_rather_than_reprompting():
 
     with pytest.raises(MitraTurnTimeout):
         channel.send_and_await_turn("hello", timeout_s=0.3, idle_gap_s=0.2)
+
+
+# ---------------------------------------------------------------------------
+# Acceptance 9: the idle gap is a gap BETWEEN fragments, not a deadline on the
+# bot's first token.
+#
+# Reported live: a turn where Mitra answered in 8.4s raised MitraTurnTimeout
+# even though turn_timeout_ms was 45000. record_stories.yaml runs a 45s turn
+# timeout against an 8s idle gap, so measuring the gap from send time made the
+# effective timeout 5.6x stricter than the configured one. Confirmed against
+# Mitra's CompanyChat rows: the turn had succeeded upstream.
+#
+# Ratios below mirror the real YAML (45:8) so the relationship under test is
+# the shipped one, just scaled to keep the suite fast.
+# ---------------------------------------------------------------------------
+
+_YAML_TIMEOUT_TO_GAP = 45.0 / 8.0
+
+
+def test_first_reply_slower_than_the_idle_gap_still_succeeds():
+    """THE regression test for "The request timed out. Your session is still
+    active." on a turn Mitra actually answered."""
+    idle_gap = 0.30
+    timeout = idle_gap * _YAML_TIMEOUT_TO_GAP          # 1.69s
+    reply_after = idle_gap * 2                          # 2x the gap, 18% of the timeout
+
+    fake = _FakeWebSocket()
+    fake.queue_raw(reply_after, _text_frame(
+        "What was the main problem you noticed?", source="bot", finish_reason="stop", step=8,
+    ))
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+
+    turn = channel.send_and_await_turn(
+        "The improvement was implemented in Melur village, Madurai district, Tamil Nadu.",
+        timeout_s=timeout, idle_gap_s=idle_gap,
+    )
+
+    assert turn.text == "What was the main problem you noticed?"
+    assert turn.step == 8
+
+
+def test_idle_gap_still_flushes_once_fragments_stop_arriving():
+    """The backstop must keep working AFTER the bot starts speaking -- that is
+    its actual purpose (§1.3). Losing it would make every truncated stream hang
+    for the full turn timeout."""
+    idle_gap = 0.25
+    timeout = idle_gap * _YAML_TIMEOUT_TO_GAP           # 1.41s -- far longer
+
+    fake = _FakeWebSocket()
+    # Two chunks, then silence: no finish_reason ever arrives.
+    fake.queue_raw(0.05, _text_frame("I am going to ", source="bot", finish_reason=None, step=3))
+    fake.queue_raw(0.02, _text_frame("tell you a story.", source="bot", finish_reason=None, step=3))
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+
+    t0 = time.monotonic()
+    turn = channel.send_and_await_turn("go on", timeout_s=timeout, idle_gap_s=idle_gap)
+    elapsed = time.monotonic() - t0
+
+    assert turn.text == "I am going to tell you a story."
+    assert elapsed < timeout * 0.75, (
+        f"flushed after {elapsed:.2f}s -- the idle gap should have ended the turn "
+        f"well before the {timeout:.2f}s turn timeout"
+    )
+
+
+def test_a_silent_upstream_still_times_out_but_only_at_the_turn_timeout():
+    """Genuine silence must still raise -- and must now wait the FULL turn
+    timeout rather than giving up at the idle gap."""
+    idle_gap = 0.15
+    timeout = 0.6
+
+    fake = _FakeWebSocket()  # empty script -> recv() blocks
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+
+    t0 = time.monotonic()
+    with pytest.raises(MitraTurnTimeout):
+        channel.send_and_await_turn("hello", timeout_s=timeout, idle_gap_s=idle_gap)
+    elapsed = time.monotonic() - t0
+
+    assert elapsed >= timeout * 0.9, (
+        f"gave up after {elapsed:.2f}s but the turn timeout is {timeout:.2f}s -- "
+        "the idle gap is being applied before the bot has said anything"
+    )
+
+
+def test_user_echo_does_not_start_the_idle_gap_clock():
+    """Mitra echoes the user's own message back immediately (§1.2). It is not
+    the bot speaking, so it must not open the idle-gap window -- otherwise the
+    echo would re-introduce the same premature timeout."""
+    idle_gap = 0.25
+    timeout = idle_gap * _YAML_TIMEOUT_TO_GAP
+
+    fake = _FakeWebSocket()
+    fake.queue_raw(0.02, _text_frame("my answer", source="user", finish_reason=None))
+    fake.queue_raw(idle_gap * 2, _text_frame("Understood.", source="bot", finish_reason="stop", step=5))
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+
+    turn = channel.send_and_await_turn("my answer", timeout_s=timeout, idle_gap_s=idle_gap)
+
+    assert turn.text == "Understood."
+
+
+def test_control_payload_then_silence_reprompts_instead_of_reporting_a_timeout():
+    """We heard from Mitra; its frame was just unusable (§Defect 4). Reporting
+    "the request timed out" would be inaccurate."""
+    fake = _FakeWebSocket()
+    fake.queue_raw(0.03, _text_frame(_LEAKED_TOOL_CALL, source="bot", finish_reason=None, step=9))
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+
+    turn = channel.send_and_await_turn("Transportation issue", timeout_s=1.2, idle_gap_s=0.2)
+
+    assert turn.text == UNREADABLE_TURN_MESSAGE

@@ -80,8 +80,30 @@ class ConversationService:
         """
         return self._msg_repo.list_page(conversation_id, after_seq=0, limit=500).messages
 
+    def find_current(
+        self, conversation_id: Optional[uuid.UUID], user: UserContext
+    ) -> Optional[ConversationDTO]:
+        """The conversation the user is currently in, or None -- never creates.
+
+        resolve() is get_or_create; callers that only want to ACT on an existing
+        conversation (reset abandoning its session) must not conjure one.
+        """
+        if conversation_id:
+            return self._conv_repo.get_scoped(conversation_id, user)
+        page = self._conv_repo.list_for_user(user, cursor=None, limit=1)
+        return page.conversations[0] if page.conversations else None
+
+    def start_new(self, user: UserContext) -> ConversationDTO:
+        """Begins a fresh conversation, leaving the previous one in the user's
+        history. See ConversationRepository.create_new."""
+        return self._conv_repo.create_new(user)
+
     def reset(self, conversation_id: uuid.UUID) -> None:
         """
         Archives the given conversation.
+
+        NOTE: /api/reset no longer calls this -- archiving on "New chat" is what
+        hid every finished conversation from the recent list. Kept for a real,
+        user-initiated archive action; `archived` now means only that.
         """
         self._conv_repo.archive(conversation_id)

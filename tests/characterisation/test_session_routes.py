@@ -29,6 +29,10 @@ class _FakeMitraRest:
         self.get_report_calls = []
         self.story_id = "9931"
         self.report_url = None
+        # Per-instance, not class attributes: a shared mutable default would
+        # leak recorded calls between tests.
+        self.chat_rows = []
+        self.recent_chat_calls = []
 
     def finalize(self, session_id, profile_id, flow, language, token, path="/api/end-story/v2/"):
         self.finalize_calls.append((session_id, profile_id, flow, language, token))
@@ -37,6 +41,16 @@ class _FakeMitraRest:
     def get_report(self, session_id, media_type="application/pdf"):
         self.get_report_calls.append((session_id, media_type))
         return self.report_url
+
+    # -- lost-turn recovery -------------------------------------------------
+    # chat_rows is what Mitra's CompanyChat "already contains"; recording the
+    # calls is how the tests assert that recovery is READ-ONLY.
+    def recent_chat(self, session_id, profile_id, tail=10):
+        self.recent_chat_calls.append((session_id, profile_id, tail))
+        return list(self.chat_rows)
+
+    def is_session_completed(self, session_id):
+        return False
 
 
 class _FakeMitraSessions:
@@ -368,3 +382,123 @@ def test_report_200_with_freshly_fetched_url(client, stub_registry, fake_mitra, 
     assert response.status_code == 200
     assert body["report_url"] == "https://example.com/fresh.pdf"
     assert len(rest.get_report_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# POST /api/sessions/{id}/resume -- the safe replacement for the Retry button.
+#
+# Retry used to re-POST /api/chat with the same text. Live, Mitra had already
+# answered and advanced, so the re-send was recorded as the answer to the NEXT
+# question -- the §1.6 answer-destruction hazard. This route is read-only
+# against Mitra and only ever reports whether re-sending is safe.
+# ---------------------------------------------------------------------------
+
+def _resume_setup(client, stub_registry, fake_mitra, script, rows):
+    from src.integrations.mitra.turn_recovery import ChatRow  # noqa: F401
+
+    rest, _sessions = fake_mitra
+    conv_id = _own_conversation_id(client, script)
+    db = SessionLocal()
+    agent_id = _insert_agent_row(db)
+    db.commit()
+    db.close()
+    stub_registry(agent_id)
+    session = _seed_awaiting_session(conv_id, agent_id)
+    rest.chat_rows = rows
+    return conv_id, session, rest
+
+
+def test_resume_recovers_a_reply_mitra_had_already_sent(client, stub_registry, fake_mitra, script):
+    """THE regression test: the reply exists upstream, so hand it back rather
+    than re-sending the user's answer into the next question."""
+    from src.integrations.mitra.turn_recovery import ChatRow
+
+    conv_id, session, rest = _resume_setup(client, stub_registry, fake_mitra, script, rows=[
+        # _own_conversation_id sends "hello" as the last user message.
+        ChatRow(id=1, from_user=True, message="hello"),
+        ChatRow(id=2, from_user=False, message="What was the main problem you noticed?"),
+    ])
+
+    response = client.post(f"/api/sessions/{session.id}/resume")
+    body = response.get_json()
+
+    assert response.status_code == 200
+    assert body["outcome"] == "answered"
+    assert body["response"] == "What was the main problem you noticed?"
+    assert body.get("can_resend") is not True
+    assert rest.recent_chat_calls, "recovery must consult Mitra's own record"
+
+
+def test_resume_persists_the_recovered_reply_into_the_transcript(client, stub_registry, fake_mitra, script):
+    """Otherwise the recovered turn vanishes on the next page reload."""
+    from src.integrations.mitra.turn_recovery import ChatRow
+
+    conv_id, session, _ = _resume_setup(client, stub_registry, fake_mitra, script, rows=[
+        ChatRow(id=1, from_user=True, message="hello"),
+        ChatRow(id=2, from_user=False, message="Recovered question?"),
+    ])
+
+    client.post(f"/api/sessions/{session.id}/resume")
+
+    messages = client.get(f"/api/conversations/{conv_id}/messages").get_json()["messages"]
+    assert messages[-1]["role"] == "assistant"
+    assert messages[-1]["content"] == "Recovered question?"
+
+
+def test_resume_reports_pending_while_mitra_is_still_generating(client, stub_registry, fake_mitra, script):
+    """202, so the client polls. It must NOT be told re-sending is safe."""
+    from src.integrations.mitra.turn_recovery import ChatRow
+
+    _conv, session, _ = _resume_setup(client, stub_registry, fake_mitra, script, rows=[
+        ChatRow(id=1, from_user=True, message="hello"),
+    ])
+
+    response = client.post(f"/api/sessions/{session.id}/resume")
+    body = response.get_json()
+
+    assert response.status_code == 202
+    assert body["outcome"] == "pending"
+    assert body.get("can_resend") is not True
+    assert body["retry_after"] >= 1
+
+
+def test_resume_allows_a_resend_only_when_mitra_never_got_the_message(client, stub_registry, fake_mitra, script):
+    """The one safe case -- and the one the old button assumed always held."""
+    from src.integrations.mitra.turn_recovery import ChatRow
+
+    _conv, session, _ = _resume_setup(client, stub_registry, fake_mitra, script, rows=[
+        ChatRow(id=1, from_user=True, message="a completely different earlier answer"),
+        ChatRow(id=2, from_user=False, message="an earlier question"),
+    ])
+
+    response = client.post(f"/api/sessions/{session.id}/resume")
+    body = response.get_json()
+
+    assert response.status_code == 200
+    assert body["outcome"] == "not_delivered"
+    assert body["can_resend"] is True
+
+
+def test_resume_404s_for_another_tenants_session(client, stub_registry, fake_mitra, script):
+    """Same scoping as every other session route -- a recovered reply is
+    conversation content and must not leak across tenants."""
+    from src.integrations.mitra.turn_recovery import ChatRow
+
+    rest, _ = fake_mitra
+    other_conv = _other_tenant_conversation_id()
+    db = SessionLocal()
+    agent_id = _insert_agent_row(db)
+    db.commit()
+    db.close()
+    stub_registry(agent_id)
+    session = _seed_awaiting_session(other_conv, agent_id)
+    rest.chat_rows = [ChatRow(id=1, from_user=False, message="secret question")]
+
+    response = client.post(f"/api/sessions/{session.id}/resume")
+
+    assert response.status_code == 404
+    assert "secret question" not in response.get_data(as_text=True)
+
+
+def test_resume_404s_for_an_unknown_session(client):
+    assert client.post(f"/api/sessions/{uuid.uuid4()}/resume").status_code == 404

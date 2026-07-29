@@ -15,6 +15,7 @@ from flask import Blueprint, current_app, g, jsonify
 
 from src.api.errors import error_response, mitra_error_response
 from src.integrations.mitra.exceptions import MitraError
+from src.integrations.mitra.turn_recovery import TurnOutcome
 from src.repositories.conversations import ConversationRepository
 from src.services.orchestration import OrchestrationService
 from src.services.session_service import SessionService
@@ -95,6 +96,65 @@ def finalize_session(session_id):
     if result is None:
         return _not_found()
     return jsonify(_serialize(result, _agent_key_for(container, result)))
+
+
+@session_bp.route("/api/sessions/<uuid:session_id>/resume", methods=["POST"])
+def resume_session(session_id):
+    """Recover a turn Saarthi stopped listening for -- WITHOUT re-sending it.
+
+    This is what the UI's Retry button must call during a remote_flow
+    interview. Re-POSTing /api/chat with the same text is unsafe: Mitra had
+    already answered and moved on, so the answer landed against the NEXT
+    question (§1.6 answer destruction). This route is read-only against Mitra.
+
+    Three outcomes, mirroring turn_recovery.TurnOutcome:
+      200 {response, ...}    Mitra had answered; the reply is now stored.
+      202 {retry_after}      Mitra is still generating; poll again.
+      200 {can_resend: true} Mitra never received it; re-sending IS safe.
+    """
+    container = current_app.config["CONTAINER"]
+    dto = _scoped_session(g.db_session, session_id)
+    if dto is None:
+        return _not_found()
+
+    orch = OrchestrationService(
+        session=g.db_session,
+        registry=container.agent_registry,
+        handler_factory=container.handler_factory,
+        llm_factory=container.llm_factory,
+        mitra_rest=container.mitra_rest,
+        mitra_sessions=container.mitra_sessions,
+    )
+    try:
+        result = orch.resume_turn(session_id, g.user)
+    except MitraError as e:
+        return mitra_error_response(e)
+
+    if result is None:
+        return _not_found()
+
+    if result.outcome is TurnOutcome.ANSWERED:
+        return jsonify({
+            "status": "success",
+            "outcome": result.outcome.value,
+            "response": result.text,
+            "options": [],   # not recoverable over REST -- see _recover_timed_out_turn
+            "session": _serialize(result.session, _agent_key_for(container, result.session)),
+        })
+
+    if result.outcome is TurnOutcome.PENDING:
+        return jsonify({
+            "status": "pending",
+            "outcome": result.outcome.value,
+            "retry_after": 3,
+        }), 202
+
+    return jsonify({
+        "status": "success",
+        "outcome": result.outcome.value,
+        # The ONLY case where the client may re-submit the user's text.
+        "can_resend": True,
+    })
 
 
 @session_bp.route("/api/sessions/<uuid:session_id>/abandon", methods=["POST"])
