@@ -190,6 +190,17 @@ document.addEventListener('DOMContentLoaded', () => {
     // -----------------------------------------------------------------------
     // Agent list (sidebar)
     // -----------------------------------------------------------------------
+    // Agents already surfaced through the capability-card buttons in the
+    // "Listening at Scale" group, plus agents that should never appear as
+    // standalone sidebar entries (the synthetic Saarthi router and the hidden
+    // fallback General Support Agent).  New direct messages always go to the
+    // orchestrator (currentAgentKey === null), so Saarthi needs no list entry.
+    const SIDEBAR_HIDDEN_KEYS = new Set([
+        'record_stories',       // shown under Listening at Scale card
+        'capture_discussion',   // shown under Listening at Scale card
+        'general_support',      // fallback-only; not user-selectable
+    ]);
+
     async function loadAgents() {
         try {
             const response = await fetch('/api/agents');
@@ -198,6 +209,10 @@ document.addEventListener('DOMContentLoaded', () => {
             agentList.innerHTML = '';
 
             agents.forEach(agent => {
+                // Skip the synthetic Saarthi router entry (no key) and any
+                // agent already represented by a capability-card button.
+                if (!agent.key || SIDEBAR_HIDDEN_KEYS.has(agent.key)) return;
+
                 const li = document.createElement('li');
                 li.className = 'agent-item';
                 // §10.3 change 2: store agent.key on the element, not agent.name
