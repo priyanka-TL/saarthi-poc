@@ -1,0 +1,232 @@
+warning: No `requires-python` value found in the workspace. Defaulting to `>=3.13`.
+============================= test session starts ==============================
+platform darwin -- Python 3.13.7, pytest-9.1.1, pluggy-1.6.0 -- /Users/priyankapradeep/Desktop/POC_SARATHI/saarathi-poc/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /Users/priyankapradeep/Desktop/POC_SARATHI/saarathi-poc
+configfile: pyproject.toml
+plugins: socket-0.8.0, cov-7.1.0, anyio-4.14.1, langsmith-0.9.3
+collecting ... collected 3 items
+
+tests/integration/test_admin_routes.py::test_admin_gate {"timestamp": "2026-07-29T14:55:15Z", "level": "ERROR", "logger": "agent_registry", "message": "Failed to reload AgentRegistry: 2 validation errors for tagged-union[function-wrap[resolve_and_store()],function-wrap[resolve_and_store()]]\nllm.prompt\n  Field required [type=missing, input_value={'key': 'test_agent_6254d...u are a test. Secret: '}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nllm.system_prompt\n  Extra inputs are not permitted [type=extra_forbidden, input_value='You are a test. Secret: ', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/extra_forbidden. Keeping cached snapshot.", "request_id": null}
+ERROR
+tests/integration/test_admin_routes.py::test_get_agent_redacts_secrets ERROR
+tests/integration/test_admin_routes.py::test_admin_endpoints ERROR
+
+==================================== ERRORS ====================================
+______________________ ERROR at setup of test_admin_gate _______________________
+
+    @pytest.fixture(scope="session")
+    def app_module():
+        """Import ``app`` and return the module.
+    
+        The assertions below verify the stub was applied correctly. Without
+        them, a mis-ordered import produces a *green* run that silently makes live,
+        billed API calls and yields non-deterministic results.
+        """
+>       import app as app_mod
+
+tests/conftest.py:80: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+app.py:4: in <module>
+    app = create_app()
+          ^^^^^^^^^^^^
+src/app_factory.py:32: in create_app
+    sync_and_reload(container)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+container = Container(settings=Settings(OPENROUTER_API_KEY='test-key-never-used', OPENROUTER_MODEL='test/scripted-model', LLM_TIME...r_provider=<src.services.identity.StaticTokenUserProvider object at 0x11904f8c0>, mitra_rest=None, mitra_sessions=None)
+
+    def sync_and_reload(container) -> None:
+        """Runs config sync, then an initial registry load.
+    
+        Deliberately has NO try/except around either step. ConfigSyncService.sync()
+        raises a pydantic ValidationError (misspelled YAML key -- the schema sets
+        extra="forbid") or an UnknownToolError (bad `tools:` entry) uncaught by
+        design. Letting those propagate out of create_app() -> import app is
+        exactly how "a misspelled YAML key aborts startup with a field path" and
+        "an unknown tool reference aborts startup" are satisfied. Do not add a
+        blanket except Exception here.
+        """
+        session = container.session_factory()
+        try:
+            service = ConfigSyncService(
+                tool_registry=container.tool_registry,
+                mitra_enabled=bool(container.settings.mitra_enabled),
+            )
+            report = service.sync(session, AGENTS_YAML_DIR, mode=container.settings.config_sync_mode)
+            logger.info("startup config_sync: %s", report.as_dict())
+        finally:
+            # sync() commits internally on success; on failure the exception is
+            # already propagating and the process is about to die anyway. Close
+            # either way to release the connection back to the pool.
+            session.close()
+    
+        session2 = container.session_factory()
+        try:
+            container.agent_registry.reload(session2)
+        finally:
+            session2.close()
+    
+        if container.agent_registry.version == 0:
+            # AgentRegistry.reload() logs and swallows its own exceptions rather
+            # than raising (by design, so a transient reload later in the process
+            # lifetime never crashes a request). That would otherwise make a
+            # broken reload at startup fail SILENTLY. This is the one place that
+            # silence is promoted back into a hard failure, specifically for the
+            # initial load.
+>           raise RuntimeError(
+                "AgentRegistry loaded 0 agents at startup in config mode; "
+                "check the config_sync report above and the agents/agent_configurations tables."
+            )
+E           RuntimeError: AgentRegistry loaded 0 agents at startup in config mode; check the config_sync report above and the agents/agent_configurations tables.
+
+src/bootstrap.py:50: RuntimeError
+------------------------------ Captured log setup ------------------------------
+ERROR    agent_registry:agent_registry.py:77 Failed to reload AgentRegistry: 2 validation errors for tagged-union[function-wrap[resolve_and_store()],function-wrap[resolve_and_store()]]
+llm.prompt
+  Field required [type=missing, input_value={'key': 'test_agent_6254d...u are a test. Secret: '}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing
+llm.system_prompt
+  Extra inputs are not permitted [type=extra_forbidden, input_value='You are a test. Secret: ', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/extra_forbidden. Keeping cached snapshot.
+_______________ ERROR at setup of test_get_agent_redacts_secrets _______________
+
+    @pytest.fixture(scope="session")
+    def app_module():
+        """Import ``app`` and return the module.
+    
+        The assertions below verify the stub was applied correctly. Without
+        them, a mis-ordered import produces a *green* run that silently makes live,
+        billed API calls and yields non-deterministic results.
+        """
+>       import app as app_mod
+
+tests/conftest.py:80: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+app.py:4: in <module>
+    app = create_app()
+          ^^^^^^^^^^^^
+src/app_factory.py:32: in create_app
+    sync_and_reload(container)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+container = Container(settings=Settings(OPENROUTER_API_KEY='test-key-never-used', OPENROUTER_MODEL='test/scripted-model', LLM_TIME...r_provider=<src.services.identity.StaticTokenUserProvider object at 0x11904f8c0>, mitra_rest=None, mitra_sessions=None)
+
+    def sync_and_reload(container) -> None:
+        """Runs config sync, then an initial registry load.
+    
+        Deliberately has NO try/except around either step. ConfigSyncService.sync()
+        raises a pydantic ValidationError (misspelled YAML key -- the schema sets
+        extra="forbid") or an UnknownToolError (bad `tools:` entry) uncaught by
+        design. Letting those propagate out of create_app() -> import app is
+        exactly how "a misspelled YAML key aborts startup with a field path" and
+        "an unknown tool reference aborts startup" are satisfied. Do not add a
+        blanket except Exception here.
+        """
+        session = container.session_factory()
+        try:
+            service = ConfigSyncService(
+                tool_registry=container.tool_registry,
+                mitra_enabled=bool(container.settings.mitra_enabled),
+            )
+            report = service.sync(session, AGENTS_YAML_DIR, mode=container.settings.config_sync_mode)
+            logger.info("startup config_sync: %s", report.as_dict())
+        finally:
+            # sync() commits internally on success; on failure the exception is
+            # already propagating and the process is about to die anyway. Close
+            # either way to release the connection back to the pool.
+            session.close()
+    
+        session2 = container.session_factory()
+        try:
+            container.agent_registry.reload(session2)
+        finally:
+            session2.close()
+    
+        if container.agent_registry.version == 0:
+            # AgentRegistry.reload() logs and swallows its own exceptions rather
+            # than raising (by design, so a transient reload later in the process
+            # lifetime never crashes a request). That would otherwise make a
+            # broken reload at startup fail SILENTLY. This is the one place that
+            # silence is promoted back into a hard failure, specifically for the
+            # initial load.
+>           raise RuntimeError(
+                "AgentRegistry loaded 0 agents at startup in config mode; "
+                "check the config_sync report above and the agents/agent_configurations tables."
+            )
+E           RuntimeError: AgentRegistry loaded 0 agents at startup in config mode; check the config_sync report above and the agents/agent_configurations tables.
+
+src/bootstrap.py:50: RuntimeError
+____________________ ERROR at setup of test_admin_endpoints ____________________
+
+    @pytest.fixture(scope="session")
+    def app_module():
+        """Import ``app`` and return the module.
+    
+        The assertions below verify the stub was applied correctly. Without
+        them, a mis-ordered import produces a *green* run that silently makes live,
+        billed API calls and yields non-deterministic results.
+        """
+>       import app as app_mod
+
+tests/conftest.py:80: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+app.py:4: in <module>
+    app = create_app()
+          ^^^^^^^^^^^^
+src/app_factory.py:32: in create_app
+    sync_and_reload(container)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+container = Container(settings=Settings(OPENROUTER_API_KEY='test-key-never-used', OPENROUTER_MODEL='test/scripted-model', LLM_TIME...r_provider=<src.services.identity.StaticTokenUserProvider object at 0x11904f8c0>, mitra_rest=None, mitra_sessions=None)
+
+    def sync_and_reload(container) -> None:
+        """Runs config sync, then an initial registry load.
+    
+        Deliberately has NO try/except around either step. ConfigSyncService.sync()
+        raises a pydantic ValidationError (misspelled YAML key -- the schema sets
+        extra="forbid") or an UnknownToolError (bad `tools:` entry) uncaught by
+        design. Letting those propagate out of create_app() -> import app is
+        exactly how "a misspelled YAML key aborts startup with a field path" and
+        "an unknown tool reference aborts startup" are satisfied. Do not add a
+        blanket except Exception here.
+        """
+        session = container.session_factory()
+        try:
+            service = ConfigSyncService(
+                tool_registry=container.tool_registry,
+                mitra_enabled=bool(container.settings.mitra_enabled),
+            )
+            report = service.sync(session, AGENTS_YAML_DIR, mode=container.settings.config_sync_mode)
+            logger.info("startup config_sync: %s", report.as_dict())
+        finally:
+            # sync() commits internally on success; on failure the exception is
+            # already propagating and the process is about to die anyway. Close
+            # either way to release the connection back to the pool.
+            session.close()
+    
+        session2 = container.session_factory()
+        try:
+            container.agent_registry.reload(session2)
+        finally:
+            session2.close()
+    
+        if container.agent_registry.version == 0:
+            # AgentRegistry.reload() logs and swallows its own exceptions rather
+            # than raising (by design, so a transient reload later in the process
+            # lifetime never crashes a request). That would otherwise make a
+            # broken reload at startup fail SILENTLY. This is the one place that
+            # silence is promoted back into a hard failure, specifically for the
+            # initial load.
+>           raise RuntimeError(
+                "AgentRegistry loaded 0 agents at startup in config mode; "
+                "check the config_sync report above and the agents/agent_configurations tables."
+            )
+E           RuntimeError: AgentRegistry loaded 0 agents at startup in config mode; check the config_sync report above and the agents/agent_configurations tables.
+
+src/bootstrap.py:50: RuntimeError
+=========================== short test summary info ============================
+ERROR tests/integration/test_admin_routes.py::test_admin_gate - RuntimeError:...
+ERROR tests/integration/test_admin_routes.py::test_get_agent_redacts_secrets
+ERROR tests/integration/test_admin_routes.py::test_admin_endpoints - RuntimeE...
+============================== 3 errors in 0.93s ===============================

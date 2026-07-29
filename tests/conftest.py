@@ -25,7 +25,7 @@ os.environ["OPENROUTER_API_KEY"] = "test-key-never-used"
 os.environ["OPENROUTER_MODEL"] = "test/scripted-model"
 os.environ["LLM_TIMEOUT"] = "1"
 os.environ["LLM_MAX_RETRIES"] = "1"
-os.environ["LOG_LEVEL"] = "CRITICAL"
+os.environ["LOG_LEVEL"] = "ERROR"
 
 # ---------------------------------------------------------------------------
 # 2. Install the stub BEFORE any src.agents.* import.

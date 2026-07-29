@@ -35,10 +35,12 @@ def create_app():
     from src.api.chat_routes import chat_bp
     from src.api.agent_routes import agent_bp
     from src.api.session_routes import session_bp
+    from src.api.admin_routes import admin_bp
 
     app.register_blueprint(chat_bp)
     app.register_blueprint(agent_bp)
     app.register_blueprint(session_bp)
+    app.register_blueprint(admin_bp)
 
     # Register request hooks
     from src.api.deps import before_request, after_request, teardown_request
