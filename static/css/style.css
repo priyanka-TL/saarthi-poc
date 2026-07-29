@@ -48,7 +48,7 @@
 }
 
 [data-theme="dark"] body {
-    background-image: 
+    background-image:
         linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
         linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
 }
@@ -62,7 +62,7 @@
 body {
     font-family: 'Inter', sans-serif;
     background-color: var(--bg-color);
-    background-image: 
+    background-image:
         linear-gradient(rgba(0, 0, 0, 0.03) 1px, transparent 1px),
         linear-gradient(90deg, rgba(0, 0, 0, 0.03) 1px, transparent 1px);
     background-size: 24px 24px;
@@ -188,9 +188,9 @@ body {
 }
 
 .brand-text h1 {
-    font-family: 'Inter', sans-serif;
-    font-size: 1.3rem;
-    font-weight: 600;
+    font-family: 'Public Sans', 'Segoe UI', sans-serif;
+    font-size: 1.125rem;
+    font-weight: 500;
     letter-spacing: 0.02em;
     text-transform: uppercase;
     line-height: 1.1;
@@ -219,17 +219,30 @@ body {
     gap: 6px;
     font-size: 0.9rem;
     font-weight: 500;
-    color: #2ea043;
+    color: #1a7f56;
     white-space: nowrap;
     line-height: 1.1;
+}
+
+@keyframes blink-dot {
+
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.3;
+    }
 }
 
 .status-dot {
     width: 7px;
     height: 7px;
     border-radius: 50%;
-    background: #2ea043;
+    background: #84d6a5;
     flex-shrink: 0;
+    animation: blink-dot 2s infinite ease-in-out;
 }
 
 .meta-row {
@@ -546,7 +559,7 @@ body {
 }
 
 .agent-name {
-    font-weight: 600;
+    font-weight: 400;
     font-size: 0.92rem;
     color: var(--text-primary);
     line-height: 1.3;
@@ -1167,7 +1180,8 @@ body {
 .message-content a.report-link:focus-visible {
     background: var(--primary-color);
     color: #fff;
-    text-decoration: none;   /* the generic a:hover rule adds an underline */
+    text-decoration: none;
+    /* the generic a:hover rule adds an underline */
 }
 
 [data-theme="dark"] .message-content a.report-link:hover,

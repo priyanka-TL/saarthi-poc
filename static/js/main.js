@@ -596,8 +596,16 @@ document.addEventListener('DOMContentLoaded', () => {
         // agent like every bubble above it. Passing nothing made addMessage
         // fall back to 'Home', which reads as a different speaker.
         const attribution = agentName || lastAgent;
+        let readyText = '✅ Your story is ready.';
+        let checkingText = 'Your story is ready. Checking for the PDF report…';
+
+        if (attribution === 'Capture Discussions') {
+            readyText = '✅ Your discussion report is ready.';
+            checkingText = 'Your discussion report is ready. Checking for the PDF report…';
+        }
+
         if (session.report_url) {
-            const msg = addMessage('✅ Your story is ready.', 'system', attribution);
+            const msg = addMessage(readyText, 'system', attribution);
             // anchorEl places the notice where the session actually ended,
             // instead of at the bottom of a conversation that has since moved
             // on to another agent. addMessage() appends, so this relocates it.
@@ -605,14 +613,12 @@ document.addEventListener('DOMContentLoaded', () => {
             _appendReportAction(msg, session.report_url);
         } else {
             // Report still generating — show a "checking…" message and poll
-            const pollMsg = addMessage(
-                'Your story is ready. Checking for the PDF report…', 'system', attribution,
-            );
-            _pollReport(session.id, pollMsg);
+            const pollMsg = addMessage(checkingText, 'system', attribution);
+            _pollReport(session.id, pollMsg, readyText);
         }
     }
 
-    function _pollReport(sessionId, placeholderEl) {
+    function _pollReport(sessionId, placeholderEl, readyText = '✅ Your story is ready.') {
         let attempts = 0;
         const MAX_ATTEMPTS = 30; // 30 × 3 s = 90 s max poll
 
@@ -634,7 +640,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     _clearSessionPoll();
                     const body = placeholderEl.querySelector('.message-text');
                     if (body) {
-                        body.textContent = '✅ Your story is ready.';
+                        body.textContent = readyText;
                         _appendReportAction(placeholderEl, data.report_url);
                     }
                 }
