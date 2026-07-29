@@ -123,6 +123,9 @@ class SessionService:
         the repository's .get()) for the cached result_ref."""
         return self._sessions.claim_finalizing(session_id)
 
+    def get(self, session_id: uuid.UUID) -> Optional[AgentSessionDTO]:
+        return self._sessions.get(session_id)
+
     def abandon(self, conversation_id: uuid.UUID, reason: str, actor: str = "system") -> Optional[AgentSessionDTO]:
         """Terminal, unpin, audit -- all against the same Session/transaction,
         so a single commit makes all three changes atomic. Bypasses apply()'s

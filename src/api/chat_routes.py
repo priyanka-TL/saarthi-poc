@@ -33,7 +33,9 @@ def chat():
             session=g.db_session,
             registry=container.agent_registry,
             handler_factory=container.handler_factory,
-            llm_factory=container.llm_factory
+            llm_factory=container.llm_factory,
+            mitra_rest=container.mitra_rest,
+            mitra_sessions=container.mitra_sessions,
         )
         
         req_conv_id = uuid.UUID(conversation_id_str) if conversation_id_str else None

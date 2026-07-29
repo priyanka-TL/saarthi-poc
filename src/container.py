@@ -29,6 +29,8 @@ class Container:
     handler_factory: HandlerFactory
     agent_registry: AgentRegistry
     user_provider: Any  # StaticTokenUserProvider | RequestTokenUserProvider
+    mitra_rest: Optional[Any] = None       # MitraRestClient | None (mitra_enabled gated)
+    mitra_sessions: Optional[Any] = None   # MitraSessionManager | None (mitra_enabled gated)
 
 
 def build_container(settings: Settings) -> Container:
@@ -49,21 +51,28 @@ def build_container(settings: Settings) -> Container:
 
     llm_factory = LlmFactory()
 
-    # mitra_rest: built when mitra_enabled is set. When disabled (the default)
-    # the client is None and LlmAgentHandler is unaffected -- it never touches
-    # these two fields. RemoteFlowAgentHandler will check for None and raise
-    # a clear error if an operator enables a remote_flow agent without setting
-    # MITRA_BASE_URL etc.
+    # mitra_rest / mitra_sessions: built when mitra_enabled is set. When
+    # disabled (the default) both are None and LlmAgentHandler is unaffected
+    # -- it never touches these fields. RemoteFlowAgentHandler checks for
+    # None and raises a clear error if an operator enables a remote_flow
+    # agent without setting MITRA_BASE_URL etc. The SAME instances are
+    # threaded into both HandlerDeps (so RemoteFlowAgentHandler uses them)
+    # and exposed directly on Container (so OrchestrationService's
+    # finalisation logic shares the identical channel pool/REST client,
+    # not a second, independent set).
     mitra_rest = None
+    mitra_sessions = None
     if settings.mitra_enabled:
         from src.integrations.mitra.rest_client import from_settings as build_mitra_rest
+        from src.integrations.mitra.session_manager import MitraSessionManager
         mitra_rest = build_mitra_rest(settings)
+        mitra_sessions = MitraSessionManager(settings)
 
     deps = HandlerDeps(
         llm_factory=llm_factory,
         tool_registry=tool_registry,
         mitra_rest=mitra_rest,
-        mitra_sessions=None,
+        mitra_sessions=mitra_sessions,
         settings=settings,
     )
     handler_factory = HandlerFactory(deps)
@@ -81,4 +90,6 @@ def build_container(settings: Settings) -> Container:
         handler_factory=handler_factory,
         agent_registry=agent_registry,
         user_provider=user_provider,
+        mitra_rest=mitra_rest,
+        mitra_sessions=mitra_sessions,
     )

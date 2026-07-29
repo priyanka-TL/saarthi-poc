@@ -3,7 +3,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Optional, List, Any
 
-from src.agents.protocol import TurnContext, AgentSessionView, Option
+from src.agents.protocol import TurnContext, AgentSessionView, Option, SessionDelta, SessionState
+from src.repositories.audit import AuditLogRepository
 from src.repositories.conversations import ConversationRepository
 from src.repositories.messages import MessageRepository
 from src.repositories.sessions import AgentSessionRepository
@@ -49,19 +50,24 @@ class OrchestrationService:
         handler_factory: HandlerFactory,
         llm_factory: Any,
         router_service: Optional[RouterService] = None,
+        mitra_rest: Optional[Any] = None,
+        mitra_sessions: Optional[Any] = None,
     ):
         self._db = session
         self._registry = registry
         self._handlers = handler_factory
         self._llm_factory = llm_factory
-        
+        self._mitra_rest = mitra_rest
+        self._mitra_sessions = mitra_sessions
+
         self._conversations = ConversationRepository(session)
         self._messages = MessageRepository(session)
         self._sessions = SessionService(session)
         self._sessions_repo = AgentSessionRepository(session)
-        
+        self._audit = AuditLogRepository(session)
+
         self._router = router_service or RouterService(session, registry, llm_factory)
-        
+
         # Dummies for missing components
         self._rate_limits = RateLimitsDummy()
         self._tools_repo = ToolsRepoDummy()
@@ -142,7 +148,7 @@ class OrchestrationService:
         if turn.session_delta and session_view:
             session_view = self._sessions.apply(session_view, turn.session_delta)
         if turn.terminal and session_view:
-            session_view = self._finalize(session_view, agent, turn)
+            session_view = self._finalize(session_view, agent, ctx_in.user)
 
         # 12. persist the agent message
         options_dict = [o.__dict__ for o in turn.options] if turn.options else None
@@ -184,12 +190,77 @@ class OrchestrationService:
             session=session_view
         )
         
-    def _finalize(self, session_view, agent, turn):
-        # Dummy finalizer to satisfy the invocation
-        # In a real impl, this uses claim_finalizing and hits Mitra finalize endpoint
+    def _finalize(self, session_view, agent, user):
+        """Finalisation, triggered by AgentTurn.terminal (design doc §4.7, §8.5).
+
+        Mitra's Story.session is UNIQUE (story_models.py:30, verified against
+        real source) -- a second finalize() call for one session fails on
+        Mitra's side. claim_finalizing()'s conditional UPDATE + uq_sess_remote
+        together make a duplicate structurally impossible on Saarthi's side
+        too, which is why the claim is step 1 and everything else only runs
+        if it's won.
+        """
+        # 1. THE CLAIM.
         claimed = self._sessions.claim_finalizing(session_view.id)
-        if claimed:
-            from src.agents.protocol import SessionDelta, SessionState
-            # transition to completed
-            return self._sessions.apply(claimed, SessionDelta(state=SessionState.completed))
-        return session_view
+        if claimed is None:
+            # Zero rows: another request already owns finalisation. Return
+            # whatever the DB actually shows right now (still 'finalizing',
+            # or already 'completed' with its real result_ref if the winner
+            # finished first) -- the client polls either way.
+            current = self._sessions.get(session_view.id)
+            return current if current is not None else session_view
+
+        # 2. Audit the claim.
+        self._audit.insert(
+            action="session_finalize",
+            entity_type="agent_session",
+            entity_id=claimed.id,
+            before=session_view.model_dump(mode="json"),
+            after=claimed.model_dump(mode="json"),
+        )
+
+        # 3. CLOSE THE CHANNEL cleanly BEFORE calling finalize.
+        if self._mitra_sessions is not None:
+            self._mitra_sessions.close(claimed.conversation_id)
+
+        # 4. finalize() with the user's token.
+        try:
+            story_id, _content = self._mitra_rest.finalize(
+                session_id=claimed.remote_session_id,
+                profile_id=claimed.remote_profile_id,
+                flow=agent.spec.remote.flow_name,
+                language=claimed.language,
+                token=user.token,
+            )
+        except Exception as e:
+            # Don't leave the session stuck in 'finalizing' forever -- that
+            # state has no other way out. Not explicitly in the doc's
+            # sequence, but a session that can never reach a terminal state
+            # is a real bug.
+            self._sessions.apply(claimed, SessionDelta(state=SessionState.failed, error=str(e)))
+            raise
+
+        # 6. get_report() -- fetched BEFORE the completed-transition, not after.
+        # SessionService.apply() rejects every call on an already-terminal
+        # session, including same-state field-only updates (terminal states
+        # are final, by design -- see SessionService.ALLOWED). A second
+        # apply() call to attach report_url after transitioning to
+        # 'completed' would raise InvalidTransitionError. Fetching the
+        # report first lets result_ref and report_url land in the SAME
+        # apply() call instead.
+        report_url = self._mitra_rest.get_report(
+            claimed.remote_session_id, media_type=agent.spec.remote.report_media_type,
+        )
+
+        # 5. Transition to completed -- apply() sets ended_at/finalized_at itself.
+        #    report_url stays null if the report hasn't been generated yet;
+        #    a client polls /api/sessions/{id}/report for it later (outside
+        #    this method's scope).
+        delta_fields = {"result_ref": story_id}
+        if report_url:
+            delta_fields["report_url"] = report_url
+        completed = self._sessions.apply(
+            claimed, SessionDelta(state=SessionState.completed, **delta_fields),
+        )
+        self._conversations.unpin(claimed.conversation_id)
+        return completed
