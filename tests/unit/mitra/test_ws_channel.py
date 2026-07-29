@@ -1,0 +1,287 @@
+"""Unit tests for MitraChannel against a fake WebSocket double.
+
+No real network. Settle/timeout/idle-gap values are kept small (tens to
+hundreds of milliseconds) so the suite stays fast while still exercising
+real wall-clock timing logic, not mocked-out time.
+"""
+from __future__ import annotations
+
+import json
+import time
+from dataclasses import dataclass, field
+from typing import List, Optional, Union
+
+import pytest
+
+from src.integrations.mitra.exceptions import (
+    MitraChannelClosed,
+    MitraRemoteError,
+    MitraTurnTimeout,
+)
+from src.integrations.mitra.ws_channel import MitraChannel
+
+
+# ---------------------------------------------------------------------------
+# Test doubles
+# ---------------------------------------------------------------------------
+
+# How long the fake blocks in recv() when the script is empty -- long enough
+# that it would fail any test relying on a short settle/timeout/idle-gap if
+# MitraChannel incorrectly waited on recv() itself instead of its own queue
+# timeout, but short enough not to leave the suite hanging.
+_BLOCK_FOREVER_S = 5.0
+
+
+class _FakeWebSocket:
+    def __init__(self):
+        self.sent: List[str] = []
+        self.connect_args = None
+        self.closed = False
+        self._script: List[tuple] = []  # (delay_s, payload: str | Exception)
+
+    def queue_raw(self, delay_s: float, payload: Union[str, Exception]) -> None:
+        self._script.append((delay_s, payload))
+
+    def connect(self, url, **kwargs):
+        self.connect_args = (url, kwargs)
+
+    def send(self, text: str) -> None:
+        self.sent.append(text)
+
+    def recv(self) -> str:
+        if not self._script:
+            time.sleep(_BLOCK_FOREVER_S)
+            return ""
+        delay_s, payload = self._script.pop(0)
+        time.sleep(delay_s)
+        if isinstance(payload, Exception):
+            raise payload
+        return payload
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _text_frame(msg: str, source: str, finish_reason=None, **extra) -> str:
+    body = {"msg": msg, "source": source, "finish_reason": finish_reason}
+    body.update(extra)
+    return json.dumps({"text": body})
+
+
+def _system_error_frame(error: str) -> str:
+    return json.dumps({"text": {"msg": "", "source": "system", "error": error, "finish_reason": None}})
+
+
+@dataclass
+class _Handshake:
+    settle_ms: int = 50
+    ack_types: List[str] = field(default_factory=lambda: ["authenticated", "auth_success"])
+    timeout_ms: int = 5000
+
+
+@dataclass
+class _Spec:
+    flow_name: str = "guest-mi-story"
+    handshake: _Handshake = field(default_factory=_Handshake)
+
+
+@dataclass
+class _Session:
+    id: str = "sess-1"
+    remote_session_id: str = "remote-sess-1"
+    remote_profile_id: str = "profile-1"
+    language: str = "en"
+    remote_bot_route: str = "test-route"
+
+
+@dataclass
+class _Settings:
+    mitra_ws_url: str = "wss://mitra.example.com/ws/common/"
+    mitra_origin_url: str = "https://mitra.example.com"
+    mitra_user_agent: str = "test-agent"
+    mitra_ws_connect_timeout_s: float = 5.0
+    mitra_ip_city: str = ""
+    mitra_ip_state: str = ""
+    mitra_ip_zip: str = ""
+
+
+def _make_channel(fake: _FakeWebSocket, spec: Optional[_Spec] = None, sess: Optional[_Session] = None):
+    return MitraChannel(spec or _Spec(), sess or _Session(), _Settings(), ws_factory=lambda: fake)
+
+
+# ---------------------------------------------------------------------------
+# Acceptance 1: establishment completes in ~settle_ms without an ack
+# ---------------------------------------------------------------------------
+
+
+def test_establishment_completes_in_about_settle_ms_without_ack():
+    fake = _FakeWebSocket()  # empty script -> recv() blocks _BLOCK_FOREVER_S
+    spec = _Spec(handshake=_Handshake(settle_ms=50))
+
+    t0 = time.monotonic()
+    channel = _make_channel(fake, spec=spec)
+    elapsed = time.monotonic() - t0
+
+    assert elapsed < 0.3, f"establishment took {elapsed:.3f}s, expected ~0.05s"
+    assert elapsed >= 0.04
+    assert channel.alive
+
+
+def test_authenticate_frame_shape():
+    fake = _FakeWebSocket()
+    sess = _Session(remote_session_id="rs-1", remote_profile_id="pf-1", language="hi", remote_bot_route="br-1")
+    spec = _Spec(flow_name="guest-discussion", handshake=_Handshake(settle_ms=20))
+    _make_channel(fake, spec=spec, sess=sess)
+
+    assert len(fake.sent) == 1
+    frame = json.loads(fake.sent[0])
+    assert frame == {
+        "type": "authenticate",
+        "sessionid": "rs-1",
+        "profileid": "pf-1",
+        "projectid": "",
+        "taskid": None,
+        "access_token": None,
+        "route": "hi",
+        "bot_route": "br-1",
+        "flow_name": "guest-discussion",
+        "address": {"ipCity": "", "ipState": "", "ipZipCode": ""},
+    }
+
+
+# ---------------------------------------------------------------------------
+# Acceptance 2: echo frames never reach the accumulated text
+# ---------------------------------------------------------------------------
+
+
+def test_echo_frames_never_reach_accumulated_text():
+    fake = _FakeWebSocket()
+    # Queued BEFORE construction: the reader thread's recv() loop runs
+    # continuously regardless of what phase the main thread is in, so any
+    # frame meant to arrive AFTER settling needs a delay comfortably past
+    # settle_ms, or it either gets consumed as a (spurious) settling pushback
+    # or sits in the fake's script queue behind an earlier already-blocked
+    # recv() call.
+    fake.queue_raw(0.03, _text_frame("Tell me your name", source="user"))
+    fake.queue_raw(0.0, _text_frame("Nice to meet you!", source="bot", finish_reason="stop"))
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+
+    turn = channel.send_and_await_turn("Priya", timeout_s=2.0, idle_gap_s=0.5)
+    assert "Tell me your name" not in turn.text
+    assert turn.text == "Nice to meet you!"
+
+
+# ---------------------------------------------------------------------------
+# Acceptance 3: a chunked reply is accumulated in full
+# ---------------------------------------------------------------------------
+
+
+def test_chunked_reply_accumulated_in_full():
+    fake = _FakeWebSocket()
+    fake.queue_raw(0.03, _text_frame("I am going to ", source="bot", finish_reason=None, step=1))
+    fake.queue_raw(0.0, _text_frame("tell you a story ", source="bot", finish_reason=None, step=2))
+    fake.queue_raw(0.0, _text_frame("about a fox.", source="bot", finish_reason="stop", step=3))
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+
+    turn = channel.send_and_await_turn("go on", timeout_s=2.0, idle_gap_s=0.5)
+    assert turn.text == "I am going to tell you a story about a fox."
+    assert turn.step == 3
+
+
+# ---------------------------------------------------------------------------
+# Acceptance 4: idle gap flushes partial content rather than hanging
+# ---------------------------------------------------------------------------
+
+
+def test_idle_gap_flushes_partial_content_rather_than_hanging():
+    fake = _FakeWebSocket()
+    fake.queue_raw(0.03, _text_frame("partial answer", source="bot", finish_reason=None))
+    # No further frames queued -> recv() blocks _BLOCK_FOREVER_S (5s).
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+
+    t0 = time.monotonic()
+    turn = channel.send_and_await_turn("go on", timeout_s=10.0, idle_gap_s=0.1)
+    elapsed = time.monotonic() - t0
+
+    assert turn.text == "partial answer"
+    assert elapsed < 1.0, f"idle-gap flush took {elapsed:.3f}s, expected ~0.1s not the full 10s timeout"
+
+
+# ---------------------------------------------------------------------------
+# Pushback during settling
+# ---------------------------------------------------------------------------
+
+
+def test_bot_frame_during_settling_is_pushed_back_and_consumed_by_first_turn():
+    fake = _FakeWebSocket()
+    fake.queue_raw(0.01, _text_frame("Welcome!", source="bot", finish_reason="stop"))
+
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=200)))
+    # No further frames queued for the first turn -- the pushed-back frame
+    # from settling must be what answers it.
+    turn = channel.send_and_await_turn("hi", timeout_s=2.0, idle_gap_s=0.3)
+    assert turn.text == "Welcome!"
+
+
+# ---------------------------------------------------------------------------
+# Timeouts and errors
+# ---------------------------------------------------------------------------
+
+
+def test_turn_timeout_raised_when_nothing_accumulated():
+    fake = _FakeWebSocket()  # empty script, recv() blocks
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+
+    with pytest.raises(MitraTurnTimeout):
+        channel.send_and_await_turn("hello", timeout_s=0.1, idle_gap_s=0.05)
+
+
+def test_system_error_frame_raises_remote_error():
+    fake = _FakeWebSocket()
+    fake.queue_raw(0.03, _system_error_frame("Session timed out"))
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+
+    with pytest.raises(MitraRemoteError, match="Session timed out"):
+        channel.send_and_await_turn("hello", timeout_s=2.0, idle_gap_s=0.5)
+
+
+def test_channel_closed_raised_mid_turn():
+    fake = _FakeWebSocket()
+    fake.queue_raw(0.03, ConnectionError("connection reset"))
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+
+    with pytest.raises(MitraChannelClosed):
+        channel.send_and_await_turn("hello", timeout_s=2.0, idle_gap_s=0.5)
+    assert not channel.alive
+
+
+def test_channel_closed_raised_during_settling():
+    fake = _FakeWebSocket()
+    fake.queue_raw(0.0, ConnectionError("connection reset"))
+
+    with pytest.raises(MitraChannelClosed):
+        _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=200)))
+
+
+# ---------------------------------------------------------------------------
+# Reader thread / lifecycle
+# ---------------------------------------------------------------------------
+
+
+def test_reader_thread_is_daemon():
+    fake = _FakeWebSocket()
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+    assert channel._reader.daemon is True
+
+
+def test_alive_and_close():
+    fake = _FakeWebSocket()
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+    assert channel.alive is True
+
+    channel.close(quiet=True)
+    assert channel.alive is False
+    assert fake.closed is True
+
+    # Calling close() again must not raise.
+    channel.close(quiet=True)

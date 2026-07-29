@@ -4,6 +4,8 @@ These are thin wrappers so callers can catch Mitra-specific failures
 without depending on `requests.exceptions` directly.
 """
 
+from typing import Optional
+
 
 class MitraError(Exception):
     """Base class for all Mitra integration errors."""
@@ -43,3 +45,30 @@ class MitraRedirectError(MitraError):
     def __init__(self, status: int) -> None:
         super().__init__(f"Unexpected redirect (HTTP {status}) from Mitra — check MITRA_BASE_URL")
         self.status = status
+
+
+class MitraTurnTimeout(MitraError):
+    """Raised by MitraChannel.send_and_await_turn when no bot frame arrives
+    before either the turn timeout or the idle-gap backstop, and nothing had
+    been accumulated yet to flush instead."""
+
+    def __init__(self, step: Optional[int] = None) -> None:
+        super().__init__(f"no bot response before timeout (last step={step})")
+        self.step = step
+
+
+class MitraChannelClosed(MitraError):
+    """Raised when the underlying WebSocket connection has died (reader
+    thread exited) and a caller tries to use the channel anyway."""
+
+    def __init__(self, reason: str = "") -> None:
+        super().__init__(f"channel closed: {reason}" if reason else "channel closed")
+        self.reason = reason
+
+
+class MitraRemoteError(MitraError):
+    """Raised when Mitra sends a system/error frame mid-turn (source=='system'
+    with an error message set)."""
+
+    def __init__(self, msg: str) -> None:
+        super().__init__(msg)

@@ -289,10 +289,13 @@ def _parse_legacy_envelope(raw: dict) -> Frame:
             finish_reason=finish_reason,
         )
 
-    # Unknown type — treat as a system/info frame
+    # Unknown type — treat as a system/info frame.
+    # Falls back to the raw envelope_type when no explicit `source` is given,
+    # so a defensive caller (e.g. MitraChannel checking handshake.ack_types)
+    # has a checkable field instead of having to string-match `error`.
     return Frame(
         kind=FrameKind.SYSTEM,
-        source=_coerce_str(raw.get("source")),
+        source=_coerce_str(raw.get("source")) or envelope_type,
         msg=msg,
         error=f"unrecognised envelope type: {envelope_type!r}",
     )

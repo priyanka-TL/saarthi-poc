@@ -51,6 +51,15 @@ class Settings(BaseSettings):
     mitra_connect_timeout_s: float = 10.0
     mitra_read_timeout_s: float = 30.0
 
+    # ---- mitra WebSocket (MitraChannel) ----
+    mitra_ws_url: str = "wss://mitra.example.com/ws/common/"
+    mitra_ws_connect_timeout_s: float = 10.0
+    # Address fields sent in the authenticate frame. Mitra doesn't validate
+    # these against anything real for the guest flows this integration uses.
+    mitra_ip_city: str = ""
+    mitra_ip_state: str = ""
+    mitra_ip_zip: str = ""
+
 try:
     settings = Settings()
 except ValidationError as e:
