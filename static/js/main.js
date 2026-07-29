@@ -4,6 +4,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const chatMessages = document.getElementById('chat-messages');
     const typingIndicator = document.getElementById('typing-indicator');
     const agentList = document.getElementById('agent-list');
+    const recentConversationsList = document.getElementById('recent-conversations-list');
     const themeToggle = document.getElementById('theme-toggle');
     const mobileMenuBtn = document.getElementById('mobile-menu-btn');
     const mobileSidebarClose = document.getElementById('mobile-sidebar-close');
@@ -31,6 +32,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function formatTime(date) {
         return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+    }
+
+    function formatRelativeTime(date) {
+        const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+        if (seconds < 60) return 'Just now';
+        const minutes = Math.floor(seconds / 60);
+        if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+        const hours = Math.floor(minutes / 60);
+        if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+        const days = Math.floor(hours / 24);
+        if (days < 7) return `${days} day${days === 1 ? '' : 's'} ago`;
+        return date.toLocaleDateString();
     }
 
     // -----------------------------------------------------------------------
@@ -202,6 +215,50 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     loadAgents();
+
+    // -----------------------------------------------------------------------
+    // Recent conversations (sidebar, before Advanced)
+    // -----------------------------------------------------------------------
+    async function loadRecentConversations() {
+        if (!recentConversationsList) return;
+        try {
+            const response = await fetch('/api/conversations?limit=5');
+            const data = await response.json();
+
+            recentConversationsList.innerHTML = '';
+
+            (data.conversations || []).forEach(conv => {
+                const li = document.createElement('li');
+                li.className = 'agent-item';
+                li.dataset.id = conv.id;
+
+                const titleRow = document.createElement('div');
+                titleRow.className = 'agent-item-title';
+                titleRow.innerHTML = AGENT_ICON_SVG;
+                const nameSpan = document.createElement('span');
+                nameSpan.className = 'agent-name';
+                // conv.title is user-supplied text (the conversation's first
+                // message, truncated) -- textContent, never innerHTML, unlike
+                // loadAgents()'s admin-authored agent.name/description.
+                nameSpan.textContent = conv.title;
+                titleRow.appendChild(nameSpan);
+
+                const descDiv = document.createElement('div');
+                descDiv.className = 'agent-desc';
+                descDiv.textContent = conv.last_message_at
+                    ? `Last active ${formatRelativeTime(new Date(conv.last_message_at))}`
+                    : 'No messages yet';
+
+                li.appendChild(titleRow);
+                li.appendChild(descDiv);
+                recentConversationsList.appendChild(li);
+            });
+        } catch (error) {
+            console.error('Failed to load recent conversations:', error);
+        }
+    }
+
+    loadRecentConversations();
 
     // -----------------------------------------------------------------------
     // Message rendering

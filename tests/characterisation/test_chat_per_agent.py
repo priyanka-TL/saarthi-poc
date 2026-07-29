@@ -4,11 +4,13 @@ Asserts the response KEY SET and TYPES rather than the LLM text: the text is not
 a contract, but the shape is. `agent_name` is asserted exactly, because
 static/js/main.js:139 round-trips it as a selector.
 
-Two execution paths exist in BaseAgent.process and module 3.5 reimplements both,
-so both are covered here:
-
-  * LCEL chain   (has_tools=False) -- prompt | llm | StrOutputParser, base.py:40
-  * tool loop    (has_tools=True)  -- bounded 3-iteration loop,      base.py:71
+Health & Wellness, Technical Support, and Research were removed from the live
+application (src/config/agents/*.yaml deleted) -- General Support is the only
+LLM-type named agent left. Research was also the ONLY agent configured with
+`tools:`, so the tool-loop tests that used to run against it (bound-tool
+ordering, the tool-calling loop, its 3-iteration bound, tool results fed back
+to the model) have no remaining subject in the live app and are removed here,
+not adapted -- there is currently no tool-using agent left to characterise.
 """
 
 from __future__ import annotations
@@ -17,7 +19,6 @@ import pytest
 
 from tests.characterisation.conftest import (
     AGENT_NAMES,
-    TOOL_AGENT,
     TOOLLESS_AGENTS,
     chat,
 )
@@ -85,82 +86,6 @@ def test_toolless_agent_sends_its_system_prompt(client, script, agent_name):
     system = script.system_prompt(0)
     assert system
     assert "Assistant" in system
-
-
-def test_tool_agent_runs_the_tool_and_returns_the_final_answer(
-    client, script, golden, fake_ddgs
-):
-    """The tool loop: model asks for a tool, tool runs, model answers."""
-    script.queue_tool_call("web_search_tool", {"query": "python"})
-    script.queue("Here are the links.")
-
-    status, body = chat(client, "find python docs", TOOL_AGENT)
-
-    assert status == 200
-    assert_matches_shape(body, golden("chat_response_shape"))
-    assert body["agent_name"] == TOOL_AGENT
-    assert body["response"] == "Here are the links."
-    assert fake_ddgs.calls == [("text", "python")]
-
-
-def test_tool_agent_binds_tools_in_declaration_order(client, script, fake_ddgs):
-    """Order is significant -- it can influence which tool a model picks.
-
-    specialized.py:62 declares [youtube_search_tool, web_search_tool]; module 3.8
-    must preserve that order in YAML.
-    """
-    script.queue("no tools needed")
-
-    chat(client, "hello", TOOL_AGENT)
-
-    assert [t.name for t in script.bound_tools[0]] == [
-        "youtube_search_tool",
-        "web_search_tool",
-    ]
-
-
-def test_tool_agent_can_answer_without_calling_a_tool(client, script, fake_ddgs):
-    """base.py:76-77 -- no tool_calls means the first reply is final."""
-    script.queue("Direct answer, no search needed.")
-
-    status, body = chat(client, "hello", TOOL_AGENT)
-
-    assert status == 200
-    assert body["response"] == "Direct answer, no search needed."
-    assert fake_ddgs.calls == []
-    assert len(script.calls) == 1
-
-
-def test_tool_loop_is_bounded_and_degrades_to_raw_output(client, script, fake_ddgs):
-    """base.py:69 caps the loop at 3 iterations; base.py:98-100 is the fallback.
-
-    Three consecutive tool calls exhaust the bound. The loop then makes ONE more
-    invocation, and if that yields empty content the app returns the raw tool
-    result rather than nothing. Four scripted responses, therefore.
-    """
-    for i in range(3):
-        script.queue_tool_call("web_search_tool", {"query": f"q{i}"}, call_id=f"c{i}")
-    script.queue("")  # empty final content triggers the degradation
-
-    status, body = chat(client, "search repeatedly", TOOL_AGENT)
-
-    assert status == 200
-    assert len(script.calls) == 4, "3 loop iterations + 1 forced final call"
-    assert body["response"].startswith("Here is the raw data I found:")
-    assert len(fake_ddgs.calls) == 3
-
-
-def test_tool_result_is_fed_back_to_the_model(client, script, fake_ddgs):
-    """base.py:94 appends a ToolMessage so the model can read the result."""
-    script.queue_tool_call("youtube_search_tool", {"query": "tutorial"})
-    script.queue("Final.")
-
-    chat(client, "find a tutorial", TOOL_AGENT)
-
-    second_call = script.calls[1]
-    tool_messages = [m for m in second_call if m.type == "tool"]
-    assert len(tool_messages) == 1
-    assert "Fake Video One" in tool_messages[0].content
 
 
 @pytest.mark.parametrize("agent_name", AGENT_NAMES)

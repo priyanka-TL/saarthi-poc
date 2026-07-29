@@ -90,70 +90,58 @@ def test_consecutive_same_agent_turns_do_not_duplicate_a_stop(client, script):
     assert body["flow"]["current_index"] == 0
 
 
-def test_switching_agents_appends_a_stop(client, script):
+def test_switching_agents_appends_a_stop(client, script, second_llm_agent):
+    second_name, _key = second_llm_agent
     script.queue("a")
-    chat(client, "one", "Health & Wellness Agent")
+    chat(client, "one", DEFAULT_AGENT)
     script.queue("b")
-    _, body = chat(client, "two", "Technical Support Agent")
+    _, body = chat(client, "two", second_name)
 
-    assert body["flow"]["stops"] == [
-        "Health & Wellness Agent",
-        "Technical Support Agent",
-    ]
+    assert body["flow"]["stops"] == [DEFAULT_AGENT, second_name]
     assert body["flow"]["current_index"] == 1
 
 
-def test_returning_to_an_earlier_agent_appends_again(client, script):
+def test_returning_to_an_earlier_agent_appends_again(client, script, second_llm_agent):
     """Dedup is against the LAST stop only, not the whole list -- so an agent can
     legitimately appear more than once in the breadcrumb."""
+    second_name, _key = second_llm_agent
     script.queue("a")
-    chat(client, "one", "Health & Wellness Agent")
+    chat(client, "one", DEFAULT_AGENT)
     script.queue("b")
-    chat(client, "two", "Technical Support Agent")
+    chat(client, "two", second_name)
     script.queue("c")
-    _, body = chat(client, "three", "Health & Wellness Agent")
+    _, body = chat(client, "three", DEFAULT_AGENT)
 
-    assert body["flow"]["stops"] == [
-        "Health & Wellness Agent",
-        "Technical Support Agent",
-        "Health & Wellness Agent",
-    ]
+    assert body["flow"]["stops"] == [DEFAULT_AGENT, second_name, DEFAULT_AGENT]
     assert body["flow"]["current_index"] == 2
 
 
-def test_interleaved_repeats_collapse_only_when_adjacent(client, script):
-    sequence = [
-        "Health & Wellness Agent",
-        "Health & Wellness Agent",
-        "Technical Support Agent",
-        "Technical Support Agent",
-        "Health & Wellness Agent",
-    ]
+def test_interleaved_repeats_collapse_only_when_adjacent(client, script, second_llm_agent):
+    second_name, _key = second_llm_agent
+    sequence = [DEFAULT_AGENT, DEFAULT_AGENT, second_name, second_name, DEFAULT_AGENT]
     for agent in sequence:
         script.queue("reply")
         _, body = chat(client, "q", agent)
 
-    assert body["flow"]["stops"] == [
-        "Health & Wellness Agent",
-        "Technical Support Agent",
-        "Health & Wellness Agent",
-    ]
+    assert body["flow"]["stops"] == [DEFAULT_AGENT, second_name, DEFAULT_AGENT]
 
 
-def test_current_index_always_trails_the_stops_length(client, script):
-    for agent in ["Health & Wellness Agent", "Technical Support Agent", DEFAULT_AGENT]:
+def test_current_index_always_trails_the_stops_length(client, script, second_llm_agent):
+    second_name, _key = second_llm_agent
+    for agent in [DEFAULT_AGENT, second_name, DEFAULT_AGENT]:
         script.queue("reply")
         _, body = chat(client, "q", agent)
         flow = body["flow"]
         assert flow["current_index"] == len(flow["stops"]) - 1
 
 
-def test_router_selected_agent_is_recorded_in_the_breadcrumb(client, script):
+def test_router_selected_agent_is_recorded_in_the_breadcrumb(client, script, second_llm_agent):
     """The stop records who ANSWERED, not what the client asked for."""
     import json
-    script.queue(json.dumps({"agent_key": "technical_support", "confidence": 0.9}))  # classification
+    second_name, second_key = second_llm_agent
+    script.queue(json.dumps({"agent_key": second_key, "confidence": 0.9}))  # classification
     script.queue("reply")
 
     _, body = chat(client, "route me", "Saarthi")
 
-    assert body["flow"]["stops"] == ["Technical Support Agent"]
+    assert body["flow"]["stops"] == [second_name]

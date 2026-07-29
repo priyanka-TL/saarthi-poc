@@ -61,6 +61,12 @@ class ConversationService:
             "current_index": len(stops) - 1 if stops else -1
         }
 
+    def list_recent(self, user: UserContext, limit: int) -> ConversationPageDTO:
+        """
+        Returns the user's most recently active conversations, newest first.
+        """
+        return self._conv_repo.list_for_user(user, cursor=None, limit=limit)
+
     def reset(self, conversation_id: uuid.UUID) -> None:
         """
         Archives the given conversation.

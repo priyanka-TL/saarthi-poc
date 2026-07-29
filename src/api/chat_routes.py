@@ -85,6 +85,31 @@ def chat():
         current_app.logger.error(f"Error handling request: {e}")
         return error_response("An internal error occurred.", "INTERNAL", 500)
 
+@chat_bp.route("/api/conversations", methods=["GET"])
+def list_conversations():
+    """The caller's most recently active conversations, newest first --
+    powers the sidebar's recent-conversations list."""
+    try:
+        limit = int(request.args.get("limit", 5))
+    except ValueError:
+        return error_response("limit must be an integer", "INVALID_REQUEST", 400)
+    limit = max(1, min(limit, 20))
+
+    svc = ConversationService(g.db_session)
+    page = svc.list_recent(g.user, limit)
+
+    return jsonify({
+        "conversations": [
+            {
+                "id": str(c.id),
+                "title": c.title or "New conversation",
+                "last_message_at": c.last_message_at.isoformat() if c.last_message_at else None,
+                "message_count": c.message_count,
+            }
+            for c in page.conversations
+        ]
+    })
+
 @chat_bp.route("/api/reset", methods=["POST"])
 def reset():
     """API endpoint to clear the conversation and start a new flow."""

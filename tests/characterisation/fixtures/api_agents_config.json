@@ -4,26 +4,26 @@
     "description": "Automatically routes your request to the best agent"
   },
   {
-    "name": "Health & Wellness Agent",
-    "description": "Provides general health, fitness, diet, and wellness tips. Does not provide medical diagnoses.",
-    "key": "health_wellness",
-    "agent_type": "llm",
-    "capabilities": ["health_qa"],
+    "name": "Record Stories",
+    "description": "Guided multi-turn interview that captures a practitioner's improvement story and produces a written narrative and PDF report. Use when the user wants to record, capture, narrate or submit a story or field experience.",
+    "key": "record_stories",
+    "agent_type": "remote_flow",
+    "capabilities": ["guided_interview", "story_capture", "pdf_report", "multilingual"],
     "status": "enabled",
     "sort_order": 10,
-    "supports_options": false,
-    "pin_session": false
+    "supports_options": true,
+    "pin_session": true
   },
   {
-    "name": "Technical Support Agent",
-    "description": "Handles technical issues like bugs, errors, login failures, broken features, and installation problems.",
-    "key": "technical_support",
-    "agent_type": "llm",
-    "capabilities": ["troubleshooting"],
+    "name": "Capture Discussion",
+    "description": "Guided interview that distils the important points from a community discussion. Use when the user wants to record, summarise or capture a meeting or group conversation.",
+    "key": "capture_discussion",
+    "agent_type": "remote_flow",
+    "capabilities": ["guided_interview", "discussion_capture", "multilingual"],
     "status": "enabled",
-    "sort_order": 20,
-    "supports_options": false,
-    "pin_session": false
+    "sort_order": 15,
+    "supports_options": true,
+    "pin_session": true
   },
   {
     "name": "General Support Agent",
@@ -33,17 +33,6 @@
     "capabilities": ["general_qa", "fallback"],
     "status": "enabled",
     "sort_order": 30,
-    "supports_options": false,
-    "pin_session": false
-  },
-  {
-    "name": "Research & Web Agent",
-    "description": "Searches the web and YouTube for information, tutorials, links, and references.",
-    "key": "research",
-    "agent_type": "llm",
-    "capabilities": ["web_search", "video_search", "citation"],
-    "status": "enabled",
-    "sort_order": 40,
     "supports_options": false,
     "pin_session": false
   }

@@ -129,18 +129,19 @@ def test_reset_clears_the_flow_title(client, script):
     assert second["flow"]["title"] == "a brand new question"
 
 
-def test_reset_clears_the_breadcrumb_stops(client, script):
+def test_reset_clears_the_breadcrumb_stops(client, script, second_llm_agent):
+    second_name, _key = second_llm_agent
     script.queue("a")
-    chat(client, "one", "Health & Wellness Agent")
+    chat(client, "one", DEFAULT_AGENT)
     script.queue("b")
-    _, before = chat(client, "two", "Technical Support Agent")
+    _, before = chat(client, "two", second_name)
     assert len(before["flow"]["stops"]) == 2
 
     client.post("/api/reset")
 
     script.queue("c")
-    _, after = chat(client, "three", "Technical Support Agent")
-    assert after["flow"]["stops"] == ["Technical Support Agent"]
+    _, after = chat(client, "three", second_name)
+    assert after["flow"]["stops"] == [second_name]
     assert after["flow"]["current_index"] == 0
 
 

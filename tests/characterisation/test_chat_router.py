@@ -17,10 +17,7 @@ from tests.characterisation.conftest import AGENT_NAMES, DEFAULT_AGENT, chat
 
 # Map display names to their agent keys (as registered in the YAML fixtures).
 _NAME_TO_KEY = {
-    "Health & Wellness Agent": "health_wellness",
-    "Technical Support Agent": "technical_support",
     "General Support Agent": "general_support",
-    "Research & Web Agent": "research",
 }
 
 
@@ -67,10 +64,13 @@ def test_router_prompt_is_built_from_the_live_registry(client, script):
     chat(client, "route me", "Saarthi")
 
     router_prompt = script.system_prompt(0)
-    for name in AGENT_NAMES:
+    # The prompt is built from the WHOLE live registry, not just the
+    # LLM-type agents in AGENT_NAMES -- Record Stories / Capture Discussion
+    # are router_selectable too.
+    for name in AGENT_NAMES + ["Record Stories", "Capture Discussion"]:
         assert name in router_prompt, f"{name!r} missing from the router prompt"
-    assert "Provides general health, fitness, diet, and wellness tips." in router_prompt
-    assert "Searches the web and YouTube" in router_prompt
+    assert "Handles general inquiries, business hours" in router_prompt
+    assert "captures a practitioner's improvement story" in router_prompt
 
 
 def test_router_prompt_names_the_fallback_agent(client, script):
@@ -142,26 +142,27 @@ def test_classification_exception_falls_back_to_the_default_agent(client, script
     assert body["agent_name"] == DEFAULT_AGENT
 
 
-def test_exact_key_matching_resolves_correctly(client, script):
+def test_exact_key_matching_resolves_correctly(client, script, second_llm_agent):
     """RouterService uses get_by_key_exact() -- the JSON key must match exactly.
 
     The old orchestrator.py:62-65 used substring matching, which caused
     agent-name collisions. The new router never matches by substring.
     """
-    script.queue(_classify_json("technical_support"))
+    name, key = second_llm_agent
+    script.queue(_classify_json(key))
     script.queue("reply")
 
     _, body = chat(client, "my app crashed", "Saarthi")
 
-    assert body["agent_name"] == "Technical Support Agent"
+    assert body["agent_name"] == name
 
 
-def test_key_matching_is_case_normalised(client, script):
+def test_key_matching_is_case_normalised(client, script, second_llm_agent):
     """get_by_key_exact() strips and lowercases the key before lookup."""
-    script.queue(_classify_json("TECHNICAL_SUPPORT", 0.9))
+    name, key = second_llm_agent
+    script.queue(_classify_json(key.upper(), 0.9))
     script.queue("reply")
 
     _, body = chat(client, "my app crashed", "Saarthi")
 
-    # TECHNICAL_SUPPORT normalises to technical_support -> Technical Support Agent
-    assert body["agent_name"] == "Technical Support Agent"
+    assert body["agent_name"] == name
