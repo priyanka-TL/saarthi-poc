@@ -14,7 +14,7 @@ full-registry order used here is defined locally instead.
 
 from __future__ import annotations
 
-FULL_REGISTRY_NAMES_IN_ORDER = ["Record Stories", "Capture Discussion", "General Support Agent"]
+FULL_REGISTRY_NAMES_IN_ORDER = ["Record Stories", "Capture Discussions", "General Support Agent"]
 
 SYNTHETIC_ROUTER_ENTRY = {
     "name": "Saarthi",

@@ -15,7 +15,7 @@
     "pin_session": true
   },
   {
-    "name": "Capture Discussion",
+    "name": "Capture Discussions",
     "description": "Guided interview that distils the important points from a community discussion. Use when the user wants to record, summarise or capture a meeting or group conversation.",
     "key": "capture_discussion",
     "agent_type": "remote_flow",

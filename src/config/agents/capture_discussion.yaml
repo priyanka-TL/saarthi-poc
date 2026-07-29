@@ -1,6 +1,6 @@
 schema_version: 1
 key: capture_discussion
-name: "Capture Discussion"
+name: "Capture Discussions"
 description: >-
   Guided interview that distils the important points from a community discussion.
   Use when the user wants to record, summarise or capture a meeting or group conversation.

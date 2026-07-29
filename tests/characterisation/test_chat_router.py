@@ -65,9 +65,9 @@ def test_router_prompt_is_built_from_the_live_registry(client, script):
 
     router_prompt = script.system_prompt(0)
     # The prompt is built from the WHOLE live registry, not just the
-    # LLM-type agents in AGENT_NAMES -- Record Stories / Capture Discussion
+    # LLM-type agents in AGENT_NAMES -- Record Stories / Capture Discussions
     # are router_selectable too.
-    for name in AGENT_NAMES + ["Record Stories", "Capture Discussion"]:
+    for name in AGENT_NAMES + ["Record Stories", "Capture Discussions"]:
         assert name in router_prompt, f"{name!r} missing from the router prompt"
     assert "Handles general inquiries, business hours" in router_prompt
     assert "captures a practitioner's improvement story" in router_prompt

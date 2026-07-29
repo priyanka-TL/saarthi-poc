@@ -120,7 +120,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // -----------------------------------------------------------------------
-    // §10.3 change 4: wire the dead "Capture Stories" button.
+    // §10.3 change 4: wire the dead "Record Stories" button.
     //   The old card handler read .capability-title text ("Listening at Scale")
     //   and set currentSelectedAgent = "Listening at Scale". That matched no
     //   agent → /api/chat returned 404.
