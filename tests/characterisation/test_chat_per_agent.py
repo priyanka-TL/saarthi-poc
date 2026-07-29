@@ -30,6 +30,12 @@ def assert_matches_shape(body: dict, golden_shape: dict) -> None:
     assert isinstance(body["response"], str)
     assert body["status"] == golden_shape["constants"]["status"]
 
+    # Additive module 5.7 keys: always [] / null for every agent exercised in
+    # this file (all agent_type: llm -- pin_session is false, so
+    # SessionService.open_for never creates a session for them).
+    assert body["options"] == []
+    assert body["session"] is None
+
     flow = body["flow"]
     assert set(flow) == set(golden_shape["flow_keys"])
     assert isinstance(flow["current_index"], int)

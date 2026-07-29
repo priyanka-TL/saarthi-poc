@@ -42,8 +42,9 @@ def audit(action: str, agent_id: str, note: str = "", before: str = None, after:
     logger.info(f"AUDIT [{action}] agent_id={agent_id} note={note}")
 
 class ConfigSyncService:
-    def __init__(self, tool_registry=None):
+    def __init__(self, tool_registry=None, mitra_enabled: bool = False):
         self.tool_registry = tool_registry
+        self.mitra_enabled = mitra_enabled
 
     def sync(self, session, yaml_dir: Path, mode: Literal["safe", "force"] = "safe") -> SyncReport:
         # Acquire advisory lock
@@ -73,7 +74,10 @@ class ConfigSyncService:
             if s.agent_type == "llm":
                 if self.tool_registry:
                     self.tool_registry.assert_all_known(s.tools)
-            else:
+            elif self.mitra_enabled:
+                # Only required when Mitra is actually in use -- a remote_flow
+                # agent gets forced to 'disabled' below when it's not, so its
+                # bot_route_env need not exist in that environment at all.
                 bot_route_env = s.remote.bot_route_env
                 assert os.getenv(bot_route_env), f"Missing environment variable: {bot_route_env}"
                 
@@ -90,6 +94,14 @@ class ConfigSyncService:
             
             # Case 1: Brand new
             if not agent_row:
+                # remote_flow agents cannot function without Mitra configured --
+                # MITRA_ENABLED=0 forces them disabled regardless of what the
+                # YAML says, so the UI simply never lists them (§10.2).
+                effective_status = (
+                    spec.status
+                    if (spec.agent_type == "llm" or self.mitra_enabled)
+                    else "disabled"
+                )
                 res = session.execute(
                     text("""
                         INSERT INTO agents (key, name, description, agent_type, status, is_default, sort_order)
@@ -98,7 +110,7 @@ class ConfigSyncService:
                     """),
                     {
                         "key": spec.key, "name": spec.name, "description": spec.description,
-                        "agent_type": spec.agent_type, "status": spec.status,
+                        "agent_type": spec.agent_type, "status": effective_status,
                         "is_default": getattr(spec, "default", False), "sort_order": spec.sort_order
                     }
                 )
@@ -118,10 +130,12 @@ class ConfigSyncService:
             agent_id = agent_row[0]
             
             # Identity columns follow YAML
-            # status and is_default are deliberately NOT touched (§3.3).
+            # status and is_default are deliberately NOT touched (§3.3) --
+            # this preserves an admin's manual PATCH /api/agents/{key} disable
+            # across a routine sync.
             session.execute(
                 text("""
-                    UPDATE agents 
+                    UPDATE agents
                     SET name = :name, description = :description, agent_type = :agent_type, sort_order = :sort_order, updated_at = now()
                     WHERE id = :agent_id
                 """),
@@ -130,6 +144,22 @@ class ConfigSyncService:
                     "sort_order": spec.sort_order, "agent_id": agent_id
                 }
             )
+
+            # Exception to the "never touch status on update" rule above:
+            # a remote_flow agent's status must always track MITRA_ENABLED,
+            # in BOTH directions -- flipping it to 0 must retroactively
+            # disable an agent created while it was on (or it sits enabled
+            # with nothing able to serve it), and flipping it back to 1 must
+            # restore whatever the YAML says, or a revert would leave the
+            # agent permanently disabled. This is a routine, not an admin,
+            # override, so it isn't subject to the "don't touch status"
+            # carve-out that protects a real PATCH /api/agents/{key} disable.
+            if spec.agent_type == "remote_flow":
+                effective_status = spec.status if self.mitra_enabled else "disabled"
+                session.execute(
+                    text("UPDATE agents SET status = :status, updated_at = now() WHERE id = :agent_id"),
+                    {"status": effective_status, "agent_id": agent_id}
+                )
             
             latest_yaml = session.execute(
                 text("""

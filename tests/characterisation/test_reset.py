@@ -7,7 +7,95 @@ close its channel. The response shape must survive both.
 
 from __future__ import annotations
 
+import uuid
+
+import pytest
+from sqlalchemy import text
+
+from src.agents.protocol import SessionDelta, SessionState
+from src.db.engine import SessionLocal
+from src.repositories.conversations import ConversationRepository
+from src.repositories.sessions import AgentSessionRepository
+from src.services.session_service import SessionService
 from tests.characterisation.conftest import DEFAULT_AGENT, chat
+
+
+class _FakeMitraSessions:
+    def __init__(self):
+        self.close_calls = []
+
+    def close(self, conversation_id):
+        self.close_calls.append(conversation_id)
+
+
+@pytest.fixture()
+def fake_mitra_sessions(flask_app):
+    """Container is a frozen dataclass -- object.__setattr__ bypasses that to
+    swap in a fake for the duration of one test, restored afterward."""
+    container = flask_app.config["CONTAINER"]
+    orig = container.mitra_sessions
+    fake = _FakeMitraSessions()
+    object.__setattr__(container, "mitra_sessions", fake)
+    yield fake
+    object.__setattr__(container, "mitra_sessions", orig)
+
+
+def _insert_agent_row(db_session) -> uuid.UUID:
+    row = db_session.execute(text("""
+        INSERT INTO agents (key, name, description, agent_type, status)
+        VALUES (:key, :key, 'test remote agent', 'remote_flow', 'enabled') RETURNING id
+    """), {"key": f"test_remote_{uuid.uuid4().hex[:8]}"}).fetchone()
+    return row[0]
+
+
+def _seed_awaiting_session(conversation_id: uuid.UUID, agent_id: uuid.UUID):
+    db = SessionLocal()
+    try:
+        ConversationRepository(db).pin(conversation_id, agent_id)
+        svc = SessionService(db)
+        repo = AgentSessionRepository(db)
+        pending = repo.create_pending(conversation_id, agent_id)
+        authing = svc.apply(pending, SessionDelta(
+            state=SessionState.authenticating,
+            remote_session_id=f"remote-{uuid.uuid4().hex[:8]}",
+            remote_profile_id="profile-1",
+        ))
+        in_progress = svc.apply(authing, SessionDelta(state=SessionState.in_progress))
+        awaiting = svc.apply(in_progress, SessionDelta(state=SessionState.awaiting_user, step=3))
+        db.commit()
+        return awaiting
+    finally:
+        db.close()
+
+
+def test_reset_mid_interview_abandons_session_and_closes_channel(client, script, fake_mitra_sessions):
+    script.queue("hi there")
+    _, body = chat(client, "hello", DEFAULT_AGENT)
+    conv_id = uuid.UUID(body["conversation_id"])
+
+    db = SessionLocal()
+    agent_id = _insert_agent_row(db)
+    db.commit()
+    db.close()
+    seeded = _seed_awaiting_session(conv_id, agent_id)
+
+    response = client.post("/api/reset", json={"conversation_id": str(conv_id)})
+    assert response.status_code == 200
+
+    verify = SessionLocal()
+    try:
+        state = verify.execute(
+            text("SELECT state FROM agent_sessions WHERE id = :id"), {"id": seeded.id}
+        ).scalar()
+        pinned = verify.execute(
+            text("SELECT pinned_agent_id FROM conversations WHERE id = :id"), {"id": conv_id}
+        ).scalar()
+    finally:
+        verify.close()
+
+    assert state == "abandoned"
+    assert pinned is None
+    assert fake_mitra_sessions.close_calls == [conv_id]
 
 
 def test_reset_returns_success(client):

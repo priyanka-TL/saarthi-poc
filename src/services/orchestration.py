@@ -190,6 +190,18 @@ class OrchestrationService:
             session=session_view
         )
         
+    def finalize_now(self, session_id: uuid.UUID, user) -> Optional[Any]:
+        """Public entry point for POST /api/sessions/{id}/finalize -- a forced,
+        idempotent end-story call (design doc §10.2). Returns None if no such
+        session exists so the route can 404; otherwise reuses _finalize's
+        existing claim/idempotency logic unchanged, so a mid-interview session
+        finalizes early and a repeated call just returns the cached result."""
+        session_view = self._sessions.get(session_id)
+        if session_view is None:
+            return None
+        agent = self._registry.get_by_id(str(session_view.agent_id))
+        return self._finalize(session_view, agent, user)
+
     def _finalize(self, session_view, agent, user):
         """Finalisation, triggered by AgentTurn.terminal (design doc §4.7, §8.5).
 

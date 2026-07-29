@@ -1,8 +1,11 @@
 from flask import Blueprint, render_template, request, jsonify, current_app, g
 import uuid
 from src.services.conversations import ConversationService
+from src.services.session_service import SessionService
 from src.domain.core import MemorySpec
 from src.settings import settings
+from src.api.errors import error_response, mitra_error_response
+from src.integrations.mitra.exceptions import MitraError
 
 chat_bp = Blueprint("chat_routes", __name__)
 
@@ -17,7 +20,7 @@ def chat():
     data = request.get_json()
     
     if not data or "message" not in data:
-        return jsonify({"error": "No message provided"}), 400
+        return error_response("No message provided", "INVALID_REQUEST", 400)
         
     user_message = data["message"]
     # New fields (optional)
@@ -50,7 +53,18 @@ def chat():
         
         res = orch.handle_turn(ctx_in)
         svc = ConversationService(g.db_session)
-        
+
+        session_payload = None
+        if res.session is not None:
+            session_payload = {
+                "id": str(res.session.id),
+                "state": res.session.state,
+                "step": res.session.step,
+                "agent_key": res.agent.key,
+                "result_ref": res.session.result_ref,
+                "report_url": res.session.report_url,
+            }
+
         return jsonify({
             "agent_name": res.agent.name,
             "response": res.turn.text,
@@ -59,15 +73,17 @@ def chat():
             "conversation_id": str(res.conversation.id),
             "agent_key": res.agent.key,
             "agent_type": res.agent.spec.agent_type,
+            "options": [{"id": o.id, "label": o.label, "value": o.value} for o in res.turn.options],
+            "session": session_payload,
         })
+    except MitraError as e:
+        return mitra_error_response(e)
     except Exception as e:
         from src.services.router_service import AgentNotFound
         if isinstance(e, AgentNotFound):
-            return jsonify({"error": "Agent not found"}), 404
+            return error_response("Agent not found", "AGENT_NOT_FOUND", 404)
         current_app.logger.error(f"Error handling request: {e}")
-        return jsonify({
-            "error": "An internal error occurred."
-        }), 500
+        return error_response("An internal error occurred.", "INTERNAL", 500)
 
 @chat_bp.route("/api/reset", methods=["POST"])
 def reset():
@@ -79,7 +95,15 @@ def reset():
     svc = ConversationService(g.db_session)
     # 1. Resolve current active (or specified) conversation
     conv = svc.resolve(req_conv_id, g.user)
-    
+
+    # Abandon any open session and close its Mitra channel BEFORE archiving --
+    # otherwise a reset mid-interview orphans the socket and the story is
+    # never finalized (design doc §10.2).
+    container = current_app.config["CONTAINER"]
+    abandoned = SessionService(g.db_session).abandon(conv.id, reason="reset", actor=g.user.user_id)
+    if abandoned is not None and container.mitra_sessions is not None:
+        container.mitra_sessions.close(conv.id)
+
     # 2. Archive it
     svc.reset(conv.id)
     

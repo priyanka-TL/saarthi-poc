@@ -54,6 +54,18 @@ class ConversationRepository:
         self._session.refresh(new_conv)
         return ConversationDTO.model_validate(new_conv)
 
+    def get_scoped(self, conversation_id: uuid.UUID, user: UserContext) -> Optional[ConversationDTO]:
+        """Like get_or_create's lookup half, but never creates on a miss --
+        session routes need a genuine 404 on an unknown id or a wrong tenant,
+        not a silently-created new conversation."""
+        stmt = select(Conversation).where(
+            Conversation.id == conversation_id,
+            Conversation.tenant_code == user.tenant_code,
+            Conversation.external_user_id == user.user_id,
+        )
+        conv = self._session.execute(stmt).scalar_one_or_none()
+        return ConversationDTO.model_validate(conv) if conv else None
+
     def next_seq_for_update(self, conversation_id: uuid.UUID) -> int:
         """
         Locks the conversation row (FOR UPDATE) and increments the message_count.

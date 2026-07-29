@@ -22,7 +22,10 @@ def sync_and_reload(container) -> None:
     """
     session = container.session_factory()
     try:
-        service = ConfigSyncService(tool_registry=container.tool_registry)
+        service = ConfigSyncService(
+            tool_registry=container.tool_registry,
+            mitra_enabled=bool(container.settings.mitra_enabled),
+        )
         report = service.sync(session, AGENTS_YAML_DIR, mode=container.settings.config_sync_mode)
         logger.info("startup config_sync: %s", report.as_dict())
     finally:
