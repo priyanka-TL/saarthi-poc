@@ -60,6 +60,12 @@ class Settings(BaseSettings):
     mitra_ip_state: str = ""
     mitra_ip_zip: str = ""
 
+    # ---- mitra channel pool (MitraSessionManager) ----
+    # Each open channel is a socket plus a thread -- bound the LRU. 200 is
+    # fine; 5,000 is not (design doc §7.6/§13.1).
+    mitra_max_open_channels: int = 200
+    mitra_idle_close_s: float = 1200.0
+
 try:
     settings = Settings()
 except ValidationError as e:
