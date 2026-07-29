@@ -8,6 +8,7 @@ from src.repositories.audit import AuditLogRepository
 from src.repositories.conversations import ConversationRepository
 from src.repositories.messages import MessageRepository
 from src.repositories.sessions import AgentSessionRepository
+from src.repositories.tool_executions import ToolExecutionRepository
 from src.services.router_service import RouterService, RouteDecision
 from src.services.session_service import SessionService
 from src.services.agent_registry import AgentRegistry
@@ -38,10 +39,6 @@ class RateLimitsDummy:
     def check(self, conv_id, user, limits):
         pass
 
-class ToolsRepoDummy:
-    def bulk_insert(self, msg_id, agent_id, tool_traces):
-        pass
-
 class OrchestrationService:
     def __init__(
         self,
@@ -65,12 +62,12 @@ class OrchestrationService:
         self._sessions = SessionService(session)
         self._sessions_repo = AgentSessionRepository(session)
         self._audit = AuditLogRepository(session)
+        self._tools_repo = ToolExecutionRepository(session)
 
         self._router = router_service or RouterService(session, registry, llm_factory)
 
-        # Dummies for missing components
+        # Dummy for missing rate-limits component
         self._rate_limits = RateLimitsDummy()
-        self._tools_repo = ToolsRepoDummy()
 
     def handle_turn(self, ctx_in: TurnInput) -> TurnResult:
         # 1. get_or_create conv
@@ -173,7 +170,10 @@ class OrchestrationService:
         )
 
         # 13. persist tool traces
-        self._tools_repo.bulk_insert(msg.id, agent.id, turn.tool_traces)
+        self._tools_repo.bulk_insert(
+            msg.id, agent.id, turn.tool_traces,
+            request_id=ctx_in.request_id,
+        )
         
         # 14. touch conversation (set title from first user message, truncated per contract)
         raw_title = ctx_in.text

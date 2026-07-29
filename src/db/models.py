@@ -53,6 +53,11 @@ class AuditActionEnum(enum.Enum):
     session_finalize = "session_finalize"
     session_abandon = "session_abandon"
 
+class ToolStatusEnum(enum.Enum):
+    success = "success"
+    error = "error"
+    timeout = "timeout"
+
 class Conversation(Base):
     __tablename__ = "conversations"
 
@@ -209,3 +214,63 @@ class AuditLog(Base):
         Index("ix_audit_action_time", "action", sa.text("created_at DESC")),
     )
 
+
+class ToolExecution(Base):
+    """One tool invocation within an LLM agent turn.
+
+    Design rules (§4.8):
+      - ON DELETE CASCADE from message_id: retention rides conversation retention,
+        no separate policy needed.
+      - ck_tool_error enforced at DB level: status != success implies error IS NOT NULL.
+        A failure record without an explanation is not a record.
+      - result_excerpt is truncated to 4096 chars BY THE REPOSITORY LAYER at write
+        time, not by a DB CHECK, so the truncation is observable in application logs.
+    """
+    __tablename__ = "tool_executions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")
+    )
+    message_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("conversation_messages.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # agent_id FK: ON DELETE SET NULL — attribution is optional, the record is not.
+    # Declared without ForeignKey() in the ORM because the agents table has no
+    # matching ORM class (see AgentSession for the same pattern and rationale).
+    agent_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
+
+    tool_name: Mapped[str] = mapped_column(String, nullable=False)
+    iteration: Mapped[int] = mapped_column(sa.SmallInteger, nullable=False, server_default="1")
+    arguments: Mapped[Dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=sa.text("'{}'::jsonb")
+    )
+    # result_excerpt: truncated to 4096 chars at write time (repository layer)
+    result_excerpt: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
+    result_bytes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    status: Mapped[ToolStatusEnum] = mapped_column(
+        sa.Enum(ToolStatusEnum, name="tool_status_enum", create_type=False),
+        nullable=False,
+    )
+    # error is REQUIRED when status != success (DB constraint ck_tool_error)
+    error: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
+
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    request_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("iteration BETWEEN 1 AND 10",        name="tool_iteration"),
+        CheckConstraint("duration_ms >= 0",                   name="tool_duration"),
+        CheckConstraint("status = 'success' OR error IS NOT NULL", name="tool_error"),
+        Index("ix_tool_message", "message_id"),
+        Index("ix_tool_name_time", "tool_name", sa.text("created_at DESC")),
+        Index(
+            "ix_tool_failures", "tool_name", sa.text("created_at DESC"),
+            postgresql_where=sa.text("status <> 'success'"),
+        ),
+    )
