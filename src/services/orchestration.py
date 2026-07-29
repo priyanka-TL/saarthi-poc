@@ -170,10 +170,11 @@ class OrchestrationService:
         )
 
         # 13. persist tool traces
-        self._tools_repo.bulk_insert(
-            msg.id, agent.id, turn.tool_traces,
-            request_id=ctx_in.request_id,
-        )
+        if agent.spec.features.record_tool_executions:
+            self._tools_repo.bulk_insert(
+                msg.id, agent.id, turn.tool_traces,
+                request_id=ctx_in.request_id,
+            )
         
         # 14. touch conversation (set title from first user message, truncated per contract)
         raw_title = ctx_in.text
