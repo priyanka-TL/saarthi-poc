@@ -1034,3 +1034,110 @@ body {
         padding: 13px 16px;
     }
 }
+
+/* ==========================================================================
+   §10.3 additive styles — option buttons, session state, retry
+   These are purely additive. options is [] for all existing LLM agents so
+   nothing renders until MITRA_ENABLED=1 and a remote_flow agent is active.
+   ========================================================================== */
+
+/* Option buttons that appear below a bot message (§10.3 change 3) */
+.message-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.option-btn {
+    background: transparent;
+    border: 1.5px solid var(--primary-color);
+    color: var(--primary-color);
+    border-radius: 20px;
+    padding: 6px 16px;
+    font-size: 0.82rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.18s, color 0.18s, opacity 0.18s, transform 0.12s;
+    font-family: inherit;
+}
+
+.option-btn:hover:not(:disabled) {
+    background: var(--primary-color);
+    color: #fff;
+    transform: translateY(-1px);
+}
+
+.option-btn:active:not(:disabled) {
+    transform: translateY(0);
+}
+
+/* Disabled state after click — §1.6: double-submit would silently destroy an answer */
+.option-btn--used,
+.option-btn:disabled {
+    opacity: 0.38;
+    cursor: not-allowed;
+    border-style: dashed;
+}
+
+/* Session finalizing spinner (§10.3 change 5) */
+.session-notice {
+    font-style: italic;
+}
+
+@keyframes saarthi-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+.session-spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 2px solid var(--border-color);
+    border-top-color: var(--primary-color);
+    border-radius: 50%;
+    animation: saarthi-spin 0.8s linear infinite;
+    margin-right: 8px;
+    vertical-align: middle;
+}
+
+/* PDF report download link */
+.report-link {
+    color: var(--primary-color);
+    font-weight: 600;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+}
+
+.report-link:hover {
+    color: var(--accent-color);
+}
+
+/* Retry button (§10.3 change 6 — UPSTREAM_TIMEOUT) */
+.retry-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 10px;
+    background: var(--accent-color);
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    padding: 6px 14px;
+    font-size: 0.82rem;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+    transition: background 0.18s, transform 0.12s;
+}
+
+.retry-btn:hover {
+    background: var(--primary-color);
+    transform: translateY(-1px);
+}
+
+.error-content {
+    color: var(--message-system-text);
+}

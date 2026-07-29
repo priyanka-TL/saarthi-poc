@@ -33,7 +33,9 @@ document.addEventListener('DOMContentLoaded', () => {
         return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
     }
 
-    // Load saved theme (light is the default Saarthi look)
+    // -----------------------------------------------------------------------
+    // Theme
+    // -----------------------------------------------------------------------
     if (localStorage.getItem('theme') === 'dark') {
         root.setAttribute('data-theme', 'dark');
     }
@@ -48,23 +50,17 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    // -----------------------------------------------------------------------
     // Mobile Sidebar Toggle
+    // -----------------------------------------------------------------------
     function toggleSidebar() {
         sidebar.classList.toggle('active');
         sidebarOverlay.classList.toggle('active');
     }
 
-    if (mobileMenuBtn) {
-        mobileMenuBtn.addEventListener('click', toggleSidebar);
-    }
-
-    if (mobileSidebarClose) {
-        mobileSidebarClose.addEventListener('click', toggleSidebar);
-    }
-
-    if (sidebarOverlay) {
-        sidebarOverlay.addEventListener('click', toggleSidebar);
-    }
+    if (mobileMenuBtn)        mobileMenuBtn.addEventListener('click', toggleSidebar);
+    if (mobileSidebarClose)   mobileSidebarClose.addEventListener('click', toggleSidebar);
+    if (sidebarOverlay)       sidebarOverlay.addEventListener('click', toggleSidebar);
 
     const advancedToggle = document.getElementById('advanced-toggle');
     const advancedContent = document.getElementById('advanced-content');
@@ -81,30 +77,80 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    let currentSelectedAgent = 'Saarthi'; // Default to orchestrator
+    // -----------------------------------------------------------------------
+    // §10.3 change 1: conversation identity
+    //   conversationId lives in sessionStorage so a page reload on the same
+    //   tab restores the interview; opening a new tab starts fresh.
+    // -----------------------------------------------------------------------
+    let conversationId = sessionStorage.getItem('saarthi_cid') || null;
 
-    function clearActiveItems() {
-        document.querySelectorAll('.agent-item, .capability-card, .highlight-card').forEach(el => el.classList.remove('active'));
+    // §10.3 change 2: agent identity by key, not display name.
+    //   null means "route me" — the server selects the best agent.
+    //   'Saarthi' magic string removed; routing never derived from display text.
+    let currentAgentKey = null;
+
+    function setContextBanner(label, subLabel) {
+        const banner = document.getElementById('active-context-banner');
+        const contextNameEl = document.getElementById('context-name');
+        const subContextNameEl = document.getElementById('sub-context-name');
+        if (banner && contextNameEl && subContextNameEl) {
+            contextNameEl.textContent = label + ' Context';
+            subContextNameEl.textContent = subLabel || label;
+            banner.classList.remove('hidden');
+        }
     }
 
-    document.querySelectorAll('.capability-card, .highlight-card').forEach(card => {
+    function clearActiveItems() {
+        document.querySelectorAll('.agent-item, .capability-card, .highlight-card').forEach(el =>
+            el.classList.remove('active')
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // §10.3 change 4: wire the dead "Capture Stories" button.
+    //   The old card handler read .capability-title text ("Listening at Scale")
+    //   and set currentSelectedAgent = "Listening at Scale". That matched no
+    //   agent → /api/chat returned 404.
+    //
+    //   Fix: any element with data-agent-key gets a dedicated listener that
+    //   stopPropagation()s so the generic card handler below never fires.
+    //   Routing comes from data-agent-key, not from display text.
+    // -----------------------------------------------------------------------
+    document.querySelectorAll('[data-agent-key]').forEach(el => {
+        el.addEventListener('click', (e) => {
+            e.stopPropagation();   // prevent generic card handler from winning
+
+            clearActiveItems();
+            const card = el.closest('.capability-card, .highlight-card');
+            if (card) card.classList.add('active');
+
+            currentAgentKey = el.dataset.agentKey;
+            setContextBanner(el.dataset.agentLabel || el.dataset.agentKey, 'Story capture');
+
+            if (window.innerWidth <= 768) {
+                sidebar.classList.remove('active');
+                sidebarOverlay.classList.remove('active');
+            }
+
+            // data-autostart: send the opening message automatically so the
+            // user doesn't have to type anything to start the interview.
+            if (el.dataset.autostart) {
+                sendMessage(el.dataset.autostart);
+            }
+        });
+    });
+
+    // Generic card handler for cards WITHOUT a dedicated data-agent-key listener.
+    // §10.3: this handler must NEVER drive routing — that's the bug we fixed above.
+    document.querySelectorAll('.capability-card:not([data-agent-key]), .highlight-card').forEach(card => {
         card.addEventListener('click', () => {
             clearActiveItems();
             card.classList.add('active');
 
             const titleEl = card.querySelector('.capability-title') || card.querySelector('.highlight-title');
             if (titleEl) {
-                const name = titleEl.textContent;
-                currentSelectedAgent = name;
-
-                const banner = document.getElementById('active-context-banner');
-                const contextNameEl = document.getElementById('context-name');
-                const subContextNameEl = document.getElementById('sub-context-name');
-                if (banner && contextNameEl && subContextNameEl) {
-                    contextNameEl.textContent = name + " Context";
-                    subContextNameEl.textContent = name === 'Listening at Scale' ? 'Story capture' : name;
-                    banner.classList.remove('hidden');
-                }
+                // Display label only — do NOT assign to currentAgentKey.
+                setContextBanner(titleEl.textContent, titleEl.textContent);
             }
 
             if (window.innerWidth <= 768) {
@@ -114,6 +160,9 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
+    // -----------------------------------------------------------------------
+    // Agent list (sidebar)
+    // -----------------------------------------------------------------------
     async function loadAgents() {
         try {
             const response = await fetch('/api/agents');
@@ -123,7 +172,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
             agents.forEach(agent => {
                 const li = document.createElement('li');
-                li.className = `agent-item ${agent.name === currentSelectedAgent ? 'active' : ''}`;
+                li.className = 'agent-item';
+                // §10.3 change 2: store agent.key on the element, not agent.name
+                li.dataset.key = agent.key;
                 li.innerHTML = `
                     <div class="agent-item-title">${AGENT_ICON_SVG}<span class="agent-name">${agent.name}</span></div>
                     <div class="agent-desc">${agent.description}</div>
@@ -132,18 +183,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 li.addEventListener('click', () => {
                     clearActiveItems();
                     li.classList.add('active');
-                    currentSelectedAgent = agent.name;
+                    // §10.3: route by key, keep sending agent_name for backward compat
+                    currentAgentKey = agent.key;
 
-                    const banner = document.getElementById('active-context-banner');
-                    const contextNameEl = document.getElementById('context-name');
-                    const subContextNameEl = document.getElementById('sub-context-name');
-                    if (banner && contextNameEl && subContextNameEl) {
-                        contextNameEl.textContent = agent.name + " Context";
-                        subContextNameEl.textContent = "Agent interaction";
-                        banner.classList.remove('hidden');
-                    }
+                    setContextBanner(agent.name, 'Agent interaction');
 
-                    // Close sidebar on mobile after selecting an agent
                     if (window.innerWidth <= 768) {
                         sidebar.classList.remove('active');
                         sidebarOverlay.classList.remove('active');
@@ -157,16 +201,19 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // Load agents on startup
     loadAgents();
 
+    // -----------------------------------------------------------------------
+    // Message rendering
+    // -----------------------------------------------------------------------
     function scrollToBottom() {
         chatMessages.scrollTop = chatMessages.scrollHeight;
     }
 
-    function addMessage(content, type, agentName = null) {
+    function addMessage(content, type, agentName = null, messageId = null) {
         const messageDiv = document.createElement('div');
         messageDiv.className = `message ${type}`;
+        if (messageId) messageDiv.dataset.messageId = messageId;
 
         if (type === 'agent' || type === 'system') {
             const avatar = document.createElement('div');
@@ -179,7 +226,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const contentDiv = document.createElement('div');
             contentDiv.className = 'message-content';
-            contentDiv.innerHTML = type === 'agent' ? marked.parse(content) : content;
+
+            if (type === 'agent') {
+                // §10.3 change 7: SANITISE.
+                //   contentDiv.innerHTML = marked.parse(content) is an XSS path:
+                //   Mitra bot content is externally controlled and marked does NOT
+                //   escape HTML by default. DOMPurify strips any injected scripts.
+                //   Verified against design doc §13.2 risk #20.
+                contentDiv.innerHTML = DOMPurify.sanitize(marked.parse(content));
+            } else {
+                contentDiv.textContent = content;
+            }
             body.appendChild(contentDiv);
 
             const meta = document.createElement('div');
@@ -213,20 +270,295 @@ document.addEventListener('DOMContentLoaded', () => {
 
         chatMessages.appendChild(messageDiv);
         scrollToBottom();
+        return messageDiv;
     }
 
-    let lastAgent = null;
+    // -----------------------------------------------------------------------
+    // §10.3 change 3: renderOptions — choice buttons under a bot message.
+    //   Purely additive: options is [] for all existing LLM agents.
+    //
+    //   On click:
+    //     1. Echo the label as a user message (user sees what they picked).
+    //     2. POST {message: value, option_id: id, conversation_id} — value is
+    //        what the interview bot expects; label is display only.
+    //     3. DISABLE THE WHOLE GROUP — §1.6: two user messages in a row silently
+    //        collapse in Mitra's DB. A double-submit destroys an answer.
+    // -----------------------------------------------------------------------
+    function renderOptions(options, messageDiv) {
+        if (!options || options.length === 0) return;
 
+        const group = document.createElement('div');
+        group.className = 'message-options';
+
+        options.forEach(opt => {
+            const btn = document.createElement('button');
+            btn.className = 'option-btn';
+            btn.dataset.id = opt.id;
+            btn.dataset.value = opt.value;
+            btn.textContent = opt.label;
+
+            btn.addEventListener('click', () => {
+                // Disable the whole group immediately — before the POST —
+                // so a slow network can't allow a double-click to go through.
+                group.querySelectorAll('.option-btn').forEach(b => {
+                    b.disabled = true;
+                    b.classList.add('option-btn--used');
+                });
+
+                addMessage(opt.label, 'user');
+                sendMessage(opt.value, opt.id);
+            });
+
+            group.appendChild(btn);
+        });
+
+        const body = messageDiv.querySelector('.message-body');
+        if (body) {
+            body.appendChild(group);
+        } else {
+            messageDiv.appendChild(group);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // §10.3 change 5: session state UI — finalizing / completed / report
+    // -----------------------------------------------------------------------
+    let _pollSessionTimer = null;
+
+    function _clearSessionPoll() {
+        if (_pollSessionTimer !== null) {
+            clearInterval(_pollSessionTimer);
+            _pollSessionTimer = null;
+        }
+    }
+
+    function _renderFinalizingUI() {
+        const notice = document.createElement('div');
+        notice.id = 'session-finalizing-notice';
+        notice.className = 'message system session-notice';
+        notice.innerHTML = `
+            <div class="message-avatar">${BOT_AVATAR_SVG}</div>
+            <div class="message-body">
+                <div class="message-content">
+                    <span class="session-spinner"></span>
+                    Writing your story&hellip; This may take a moment.
+                </div>
+            </div>`;
+        chatMessages.appendChild(notice);
+        scrollToBottom();
+        return notice;
+    }
+
+    function _renderCompletedUI(session) {
+        // Remove the "writing…" notice if still present
+        const notice = document.getElementById('session-finalizing-notice');
+        if (notice) notice.remove();
+
+        if (session.report_url) {
+            addMessage(
+                `Your story has been written. <a href="${DOMPurify.sanitize(session.report_url)}" ` +
+                `target="_blank" rel="noopener" class="report-link">Download PDF report</a>`,
+                'system'
+            );
+        } else {
+            // Report still generating — show a "checking…" message and poll
+            const pollMsg = addMessage('Your story is ready. Checking for the PDF report…', 'system');
+            _pollReport(session.id, pollMsg);
+        }
+    }
+
+    function _pollReport(sessionId, placeholderEl) {
+        let attempts = 0;
+        const MAX_ATTEMPTS = 30; // 30 × 3 s = 90 s max poll
+
+        _pollSessionTimer = setInterval(async () => {
+            attempts++;
+            if (attempts > MAX_ATTEMPTS) {
+                _clearSessionPoll();
+                const body = placeholderEl.querySelector('.message-content');
+                if (body) body.textContent = 'PDF report is still being generated. Please check back later.';
+                return;
+            }
+
+            try {
+                const r = await fetch(`/api/sessions/${sessionId}/report`);
+                if (r.status === 200) {
+                    const data = await r.json();
+                    _clearSessionPoll();
+                    const body = placeholderEl.querySelector('.message-content');
+                    if (body) {
+                        body.innerHTML = `Your story is ready. <a href="${DOMPurify.sanitize(data.report_url)}" ` +
+                            `target="_blank" rel="noopener" class="report-link">Download PDF report</a>`;
+                    }
+                }
+                // 202 → keep polling
+            } catch (_) { /* network hiccup — try again next tick */ }
+        }, 3000);
+    }
+
+    function _handleSession(session) {
+        if (!session) return;
+
+        if (session.state === 'finalizing') {
+            _renderFinalizingUI();
+            // Poll GET /api/sessions/{id} every 2 s until completed
+            _pollSessionTimer = setInterval(async () => {
+                try {
+                    const r = await fetch(`/api/sessions/${session.id}`);
+                    if (!r.ok) return;
+                    const updated = await r.json();
+                    if (updated.state === 'completed') {
+                        _clearSessionPoll();
+                        _renderCompletedUI(updated);
+                    } else if (updated.state === 'failed' || updated.state === 'abandoned') {
+                        _clearSessionPoll();
+                        const notice = document.getElementById('session-finalizing-notice');
+                        if (notice) notice.remove();
+                        addMessage('Story capture could not be completed. Please try again.', 'system');
+                    }
+                } catch (_) {}
+            }, 2000);
+        } else if (session.state === 'completed') {
+            _renderCompletedUI(session);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // §10.3 change 6: error handling — UPSTREAM_TIMEOUT shows a Retry button
+    // -----------------------------------------------------------------------
+    function _renderErrorWithRetry(errorMsg, retryText) {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'message system';
+
+        const avatar = document.createElement('div');
+        avatar.className = 'message-avatar';
+        avatar.innerHTML = BOT_AVATAR_SVG;
+        wrapper.appendChild(avatar);
+
+        const body = document.createElement('div');
+        body.className = 'message-body';
+
+        const content = document.createElement('div');
+        content.className = 'message-content error-content';
+        content.textContent = errorMsg;
+        body.appendChild(content);
+
+        const retryBtn = document.createElement('button');
+        retryBtn.className = 'retry-btn';
+        retryBtn.textContent = 'Retry';
+        retryBtn.addEventListener('click', () => {
+            wrapper.remove();
+            sendMessage(retryText);
+        });
+        body.appendChild(retryBtn);
+
+        wrapper.appendChild(body);
+        chatMessages.appendChild(wrapper);
+        scrollToBottom();
+    }
+
+    // -----------------------------------------------------------------------
+    // Core send function — shared by form submit, option click, and autostart
+    // -----------------------------------------------------------------------
+    let lastAgent = null;
+    // Track last sent text for the Retry button (UPSTREAM_TIMEOUT is safe to retry
+    // because the session persists in awaiting_user — §10.3 change 6).
+    let _lastSentText = '';
+
+    async function sendMessage(text, optionId = null) {
+        if (!text || !text.trim()) return;
+
+        _lastSentText = text;
+
+        userInput.value = '';
+        userInput.disabled = true;
+        typingIndicator.classList.remove('hidden');
+        scrollToBottom();
+
+        try {
+            const body = {
+                message: text,
+                // §10.3 change 2: send agent_key; also send agent_name for one release
+                // so a stale cached bundle still works (§11.1 note).
+                agent_key: currentAgentKey,
+                agent_name: currentAgentKey,   // backward-compat, remove in next release
+            };
+            if (optionId) body.option_id = optionId;
+            // §10.3 change 1: attach conversation_id if we have one
+            if (conversationId) body.conversation_id = conversationId;
+
+            const response = await fetch('/api/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+
+            const data = await response.json();
+            typingIndicator.classList.add('hidden');
+
+            // §10.3 change 1: persist conversation_id from every response
+            if (data.conversation_id) {
+                conversationId = data.conversation_id;
+                sessionStorage.setItem('saarthi_cid', conversationId);
+            }
+
+            if (data.status === 'success') {
+                if (lastAgent !== data.agent_name) {
+                    addMessage(`Switched context to ${data.agent_name}`, 'context-switch');
+                    lastAgent = data.agent_name;
+                }
+
+                const msgEl = addMessage(data.response, 'agent', data.agent_name);
+
+                // §10.3 change 3: render option buttons when present
+                if (data.options && data.options.length > 0) {
+                    renderOptions(data.options, msgEl);
+                }
+
+                // §10.3 change 5: react to session state
+                if (data.session) {
+                    _handleSession(data.session);
+                }
+            } else {
+                // §10.3 change 6: show retry on timeout; plain error otherwise
+                if (data.error_code === 'UPSTREAM_TIMEOUT') {
+                    _renderErrorWithRetry(
+                        'The request timed out. Your session is still active.',
+                        text
+                    );
+                } else {
+                    addMessage(data.error || 'An error occurred.', 'system');
+                }
+            }
+        } catch (error) {
+            typingIndicator.classList.add('hidden');
+            addMessage('Network error. Please try again.', 'system');
+        } finally {
+            userInput.disabled = false;
+            userInput.focus();
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Reset
+    // -----------------------------------------------------------------------
     async function resetConversation() {
+        _clearSessionPoll();
+
         try {
             await fetch('/api/reset', { method: 'POST' });
         } catch (error) {
             console.error('Failed to reset conversation:', error);
         }
 
+        // §10.3 change 1: clear conversation identity on reset
+        conversationId = null;
+        sessionStorage.removeItem('saarthi_cid');
+
         chatMessages.innerHTML = '';
-        addMessage("Namaste. How can I help you today?", 'system');
+        addMessage('Namaste. How can I help you today?', 'system');
         lastAgent = null;
+        currentAgentKey = null;
 
         if (window.innerWidth <= 768) {
             sidebar.classList.remove('active');
@@ -244,54 +576,14 @@ document.addEventListener('DOMContentLoaded', () => {
         initialTimeEl.textContent = formatTime(new Date());
     }
 
+    // -----------------------------------------------------------------------
+    // Form submit
+    // -----------------------------------------------------------------------
     chatForm.addEventListener('submit', async (e) => {
         e.preventDefault();
-
         const message = userInput.value.trim();
         if (!message) return;
-
-        // Add user message to chat
         addMessage(message, 'user');
-        userInput.value = '';
-        userInput.disabled = true;
-
-        // Show typing indicator
-        typingIndicator.classList.remove('hidden');
-        scrollToBottom();
-
-        try {
-            const response = await fetch('/api/chat', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    message,
-                    agent_name: currentSelectedAgent
-                })
-            });
-
-            const data = await response.json();
-
-            // Hide typing indicator
-            typingIndicator.classList.add('hidden');
-
-            if (data.status === 'success') {
-                if (lastAgent !== data.agent_name) {
-                    addMessage(`Switched context to ${data.agent_name}`, 'context-switch');
-                    lastAgent = data.agent_name;
-                }
-                // Add agent response
-                addMessage(data.response, 'agent', data.agent_name);
-            } else {
-                addMessage(data.error || 'An error occurred.', 'system');
-            }
-        } catch (error) {
-            typingIndicator.classList.add('hidden');
-            addMessage('Network error. Please try again.', 'system');
-        } finally {
-            userInput.disabled = false;
-            userInput.focus();
-        }
+        sendMessage(message);
     });
 });
