@@ -133,6 +133,7 @@ document.addEventListener('DOMContentLoaded', () => {
         el.addEventListener('click', (e) => {
             e.stopPropagation();   // prevent generic card handler from winning
 
+            resetConversation();
             clearActiveItems();
             const card = el.closest('.capability-card, .highlight-card');
             if (card) card.classList.add('active');
@@ -157,6 +158,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // §10.3: this handler must NEVER drive routing — that's the bug we fixed above.
     document.querySelectorAll('.capability-card:not([data-agent-key]), .highlight-card').forEach(card => {
         card.addEventListener('click', () => {
+            resetConversation();
             clearActiveItems();
             card.classList.add('active');
 
@@ -194,6 +196,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 `;
 
                 li.addEventListener('click', () => {
+                    resetConversation();
                     clearActiveItems();
                     li.classList.add('active');
                     // §10.3: route by key, keep sending agent_name for backward compat
