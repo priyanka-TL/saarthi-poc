@@ -1,5 +1,5 @@
 import sys
-from typing import Optional
+from typing import Literal, Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import ValidationError
 
@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     # ---- registry ----
     registry_ttl_s: int = 30
-    config_sync_mode: str = "safe"
+    config_sync_mode: Literal["safe", "force", "off"] = "safe"
 
     # ---- feature flags ----
     saarthi_user_provider: str = "static_token"

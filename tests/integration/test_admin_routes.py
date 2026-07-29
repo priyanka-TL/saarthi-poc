@@ -14,6 +14,27 @@ def db(flask_app):
     from src.db.engine import SessionLocal
     session = SessionLocal()
     yield session
+
+    # _make_agent_and_config below creates real, permanently-`enabled` agent
+    # rows (key pattern test_agent_<hex>) with no cleanup, and several tests
+    # in this file force a live container.agent_registry.reload() -- without
+    # cleanup, every run of this file leaks more enabled agents into the
+    # shared dev database and the session-scoped in-memory registry, which
+    # eventually breaks test_agents_endpoint.py's "exactly N agents" golden
+    # assertions on any later full-suite run. Delete what this file created
+    # and force one final reload so the registry doesn't keep serving a
+    # stale snapshot that still includes them.
+    ids = [
+        row[0] for row in
+        session.execute(text("SELECT id FROM agents WHERE key ~ '^test_agent_[0-9a-f]{6}$'")).fetchall()
+    ]
+    for agent_id in ids:
+        session.execute(text("DELETE FROM agent_configurations WHERE agent_id = :id"), {"id": agent_id})
+        session.execute(text("DELETE FROM audit_logs WHERE entity_id = :id"), {"id": agent_id})
+        session.execute(text("DELETE FROM agents WHERE id = :id"), {"id": agent_id})
+    session.commit()
+    if ids:
+        flask_app.config["CONTAINER"].agent_registry.reload(session)
     session.close()
 
 def _make_agent_and_config(db, name_prefix="TestAdminAgent"):

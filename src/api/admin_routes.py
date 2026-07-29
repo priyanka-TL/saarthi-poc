@@ -1,5 +1,4 @@
 import time
-import json
 from typing import Dict, Any
 
 from flask import Blueprint, jsonify, request, g, current_app
@@ -146,9 +145,9 @@ def create_config_version(key: str):
             RETURNING created_at
         """),
         {
-            "agent_id": agent_row.id, 
-            "version": new_version, 
-            "config": json.loads(canonical), 
+            "agent_id": agent_row.id,
+            "version": new_version,
+            "config": canonical,  # a JSON string -- psycopg can't adapt a raw dict to jsonb here
             "checksum": checksum
         }
     ).fetchone()
@@ -158,7 +157,7 @@ def create_config_version(key: str):
     audit_repo.insert(
         action="config_create",
         entity_type="agent_configuration",
-        entity_id=agent.id,
+        entity_id=agent_row.id,
         actor=actor,
         note=f"Created version {new_version} for {key}"
     )
@@ -236,7 +235,7 @@ def activate_config_version(key: str, version: int):
     audit_repo.insert(
         action="config_activate",
         entity_type="agent_configuration",
-        entity_id=agent.id,
+        entity_id=agent_row.id,
         actor=actor,
         note=f"Activated version {version} for {key}"
     )

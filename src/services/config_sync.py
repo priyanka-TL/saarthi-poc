@@ -1,3 +1,4 @@
+import json
 import os
 import yaml
 from pathlib import Path
@@ -5,6 +6,7 @@ from typing import Literal, Dict, List, Any
 from sqlalchemy import text
 from src.logger import get_logger
 from src.domain.agent_spec import AgentSpec, canonical_json
+from src.repositories.audit import AuditLogRepository
 
 logger = get_logger("config_sync")
 
@@ -38,18 +40,26 @@ def exactly_one(items):
     if count != 1:
         raise ValueError(f"Expected exactly 1 item, got {count}")
 
-def audit(action: str, agent_id: str, note: str = "", before: str = None, after: str = None):
-    logger.info(f"AUDIT [{action}] agent_id={agent_id} note={note}")
-
 class ConfigSyncService:
     def __init__(self, tool_registry=None, mitra_enabled: bool = False):
         self.tool_registry = tool_registry
         self.mitra_enabled = mitra_enabled
 
-    def sync(self, session, yaml_dir: Path, mode: Literal["safe", "force"] = "safe") -> SyncReport:
+    def sync(self, session, yaml_dir: Path, mode: Literal["safe", "force", "off"] = "safe") -> SyncReport:
+        if mode == "off":
+            # Suppresses reconciliation ENTIRELY -- no lock, no YAML read, no
+            # DB write at all. The right setting for production with live
+            # overrides: whatever's already `is_active` stays active, and
+            # AgentRegistry.reload() (called right after this by bootstrap.py)
+            # picks it up unchanged.
+            logger.info("config_sync: mode=off, skipping reconciliation entirely")
+            return SyncReport()
+
+        audit_repo = AuditLogRepository(session)
+
         # Acquire advisory lock
         session.execute(text("SELECT pg_advisory_xact_lock(hashtext('saarthi:agent_sync'))"))
-        
+
         specs = []
         if yaml_dir.exists():
             for path in sorted(yaml_dir.glob("*.yaml")):
@@ -123,7 +133,10 @@ class ConfigSyncService:
                     """),
                     {"agent_id": agent_id, "checksum": checksum, "config": canonical}
                 )
-                audit("config_sync", str(agent_id), note=f"created from {path.name}", after=canonical)
+                audit_repo.insert(
+                    action="config_sync", entity_type="agent_configuration", entity_id=agent_id,
+                    note=f"created from {path.name}", after=json.loads(canonical),
+                )
                 report.created.append(spec.key)
                 continue
                 
@@ -163,26 +176,56 @@ class ConfigSyncService:
             
             latest_yaml = session.execute(
                 text("""
-                    SELECT checksum FROM agent_configurations 
+                    SELECT version, checksum FROM agent_configurations
                     WHERE agent_id = :agent_id AND source = 'yaml'
                     ORDER BY version DESC LIMIT 1
                 """),
                 {"agent_id": agent_id}
             ).fetchone()
-            
-            if latest_yaml and latest_yaml[0] == checksum:
-                report.unchanged.append(spec.key)
-                continue
-                
-            # Case 2: YAML changed
+
             active_cfg = session.execute(
                 text("""
-                    SELECT version, source, config FROM agent_configurations 
+                    SELECT version, source, config FROM agent_configurations
                     WHERE agent_id = :agent_id AND is_active = true
                 """),
                 {"agent_id": agent_id}
             ).fetchone()
-            
+
+            if latest_yaml and latest_yaml[1] == checksum:
+                # The YAML itself hasn't changed since it was last synced --
+                # but if a db override is still the active version, that's
+                # STILL drift and must be reported on THIS boot too, not just
+                # the boot the divergence was first introduced on.
+                if active_cfg and active_cfg[1] == "db":
+                    if mode == "force":
+                        # Reclaim control even though the YAML content didn't
+                        # change -- force means "the YAML is truth," full stop.
+                        session.execute(
+                            text("UPDATE agent_configurations SET is_active = false WHERE agent_id = :agent_id AND version != :keep_v"),
+                            {"agent_id": agent_id, "keep_v": latest_yaml[0]}
+                        )
+                        session.execute(
+                            text("UPDATE agent_configurations SET is_active = true, activated_at = now() WHERE agent_id = :agent_id AND version = :version"),
+                            {"agent_id": agent_id, "version": latest_yaml[0]}
+                        )
+                        audit_repo.insert(
+                            action="config_activate", entity_type="agent_configuration", entity_id=agent_id,
+                            before=active_cfg[2], after=json.loads(canonical),
+                            note=f"force mode: discarded db override v{active_cfg[0]}; reactivated yaml v{latest_yaml[0]}",
+                        )
+                        report.updated.append(spec.key)
+                    else:
+                        audit_repo.insert(
+                            action="config_sync", entity_type="agent_configuration", entity_id=agent_id,
+                            after=active_cfg[2],
+                            note=f"drift: db override v{active_cfg[0]} retained (yaml v{latest_yaml[0]} unchanged)",
+                        )
+                        report.drifted.append(spec.key)
+                else:
+                    report.unchanged.append(spec.key)
+                continue
+
+            # Case 2: YAML changed
             adopt = (mode == "force") or (not active_cfg) or (active_cfg[1] == "yaml")
             
             new_v_row = session.execute(
@@ -203,11 +246,18 @@ class ConfigSyncService:
                     text("UPDATE agent_configurations SET is_active = false WHERE agent_id = :agent_id AND version != :keep_v"),
                     {"agent_id": agent_id, "keep_v": new_v_row}
                 )
-                audit("config_activate", str(agent_id), before=active_cfg[2] if active_cfg else None, after=canonical)
+                audit_repo.insert(
+                    action="config_activate", entity_type="agent_configuration", entity_id=agent_id,
+                    before=active_cfg[2] if active_cfg else None, after=json.loads(canonical),
+                )
                 report.updated.append(spec.key)
             else:
                 report.drifted.append(spec.key)
-                audit("config_sync", str(agent_id), after=canonical, note=f"yaml v{new_v_row} stored INACTIVE; db override v{active_cfg[0]} retained")
+                audit_repo.insert(
+                    action="config_sync", entity_type="agent_configuration", entity_id=agent_id,
+                    after=json.loads(canonical),
+                    note=f"drift: yaml v{new_v_row} stored INACTIVE; db override v{active_cfg[0]} retained",
+                )
 
         # Case 3: orphans (agents sourced from YAML originally but no longer in the yaml dir)
         yaml_keys = {s.key for _, s in specs}
@@ -229,9 +279,17 @@ class ConfigSyncService:
                     text("UPDATE agents SET status = 'disabled', updated_at = now() WHERE id = :agent_id"),
                     {"agent_id": orphan_id}
                 )
-                audit("agent_disable", str(orphan_id), note="yaml file removed")
+                audit_repo.insert(
+                    action="agent_disable", entity_type="agent", entity_id=orphan_id,
+                    note="yaml file removed",
+                )
                 report.orphaned.append(orphan_key)
-                
+
         session.commit()
         logger.info(f"agent config sync: {report.as_dict()}")
+        if report.drifted:
+            logger.warning(
+                "CONFIG DRIFT at startup: %s agent(s) have a live DB override diverging from YAML: %s",
+                len(report.drifted), report.drifted,
+            )
         return report
