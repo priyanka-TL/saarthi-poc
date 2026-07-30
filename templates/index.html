@@ -27,15 +27,8 @@
                     </svg>
                 </button>
             </div>
+            <!-- 
             <div class="sidebar-toolbar">
-                <button id="new-chat-btn" class="icon-btn" aria-label="Start a new conversation"
-                    title="New conversation">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                        stroke-linejoin="round" width="15" height="15">
-                        <line x1="12" y1="5" x2="12" y2="19"></line>
-                        <line x1="5" y1="12" x2="19" y2="12"></line>
-                    </svg>
-                </button>
                 <button id="theme-toggle" class="icon-btn" aria-label="Toggle theme">
                     <svg class="sun-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                         stroke-linecap="round" stroke-linejoin="round" width="15" height="15">
@@ -55,6 +48,7 @@
                     </svg>
                 </button>
             </div>
+            -->
 
             <div class="brand-card">
                 <div class="brand-left">
@@ -85,6 +79,14 @@
             </div>
 
             <div class="chat-history-placeholder">
+                <button id="new-chat-btn" class="agent-item" style="width: 100%; text-align: left; font-size: 0.9rem; font-weight: 500; color: var(--text-primary); margin-bottom: 12px; display: flex; align-items: center; gap: 8px;">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                        stroke-linejoin="round" width="16" height="16">
+                        <line x1="12" y1="5" x2="12" y2="19"></line>
+                        <line x1="5" y1="12" x2="19" y2="12"></line>
+                    </svg>
+                    New Chat
+                </button>
                 <ul id="recent-conversations-list" class="agent-list"></ul>
             </div>
 

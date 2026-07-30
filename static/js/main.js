@@ -53,15 +53,17 @@ document.addEventListener('DOMContentLoaded', () => {
         root.setAttribute('data-theme', 'dark');
     }
 
-    themeToggle.addEventListener('click', () => {
-        if (root.getAttribute('data-theme') === 'dark') {
-            root.removeAttribute('data-theme');
-            localStorage.setItem('theme', 'light');
-        } else {
-            root.setAttribute('data-theme', 'dark');
-            localStorage.setItem('theme', 'dark');
-        }
-    });
+    if (themeToggle) {
+        themeToggle.addEventListener('click', () => {
+            if (root.getAttribute('data-theme') === 'dark') {
+                root.removeAttribute('data-theme');
+                localStorage.setItem('theme', 'light');
+            } else {
+                root.setAttribute('data-theme', 'dark');
+                localStorage.setItem('theme', 'dark');
+            }
+        });
+    }
 
     // -----------------------------------------------------------------------
     // Mobile Sidebar Toggle
@@ -920,12 +922,12 @@ document.addEventListener('DOMContentLoaded', () => {
     // -----------------------------------------------------------------------
     // Form submit & Textarea auto-resize
     // -----------------------------------------------------------------------
-    userInput.addEventListener('input', function() {
+    userInput.addEventListener('input', function () {
         this.style.height = 'auto';
         this.style.height = (this.scrollHeight) + 'px';
     });
 
-    userInput.addEventListener('keydown', function(e) {
+    userInput.addEventListener('keydown', function (e) {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
             chatForm.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
@@ -938,7 +940,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!message) return;
         addMessage(message, 'user');
         sendMessage(message);
-        
+
         userInput.style.height = 'auto'; // Reset height after send
     });
 });
