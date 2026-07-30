@@ -109,7 +109,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const contextNameEl = document.getElementById('context-name');
         const subContextNameEl = document.getElementById('sub-context-name');
         if (banner && contextNameEl && subContextNameEl) {
-            contextNameEl.textContent = label + ' Context';
+            contextNameEl.textContent = label === 'Home' ? label : label + ' Context';
             subContextNameEl.textContent = subLabel || label;
             banner.classList.remove('hidden');
         }
@@ -492,6 +492,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (lastAgentName) {
                 setContextBanner(lastAgentName, 'Resumed conversation');
+            } else {
+                setContextBanner('Home', '–');
             }
 
             // Replay the session state the transcript cannot carry. The
@@ -898,6 +900,9 @@ document.addEventListener('DOMContentLoaded', () => {
         addMessage('Namaste. How can I help you today?', 'system');
         lastAgent = null;
         currentAgentKey = null;
+
+        setContextBanner('Home', '–');
+        clearActiveItems();
         // Belongs to the conversation we just left. Kept, a timeout in the NEW
         // conversation would POST /api/sessions/{old_id}/resume and recover a
         // turn from the previous interview.

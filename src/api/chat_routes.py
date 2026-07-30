@@ -195,17 +195,32 @@ def reset():
             container.mitra_sessions.close(conv.id)
 
     # 2. Start a fresh conversation, LEAVING THE PREVIOUS ONE IN HISTORY.
-    #    It used to be archived here -- that was the only way the follow-up
-    #    resolve(None) would create a new conversation instead of resuming the
-    #    old one. But GET /api/conversations excludes archived rows, so every
-    #    "New chat" quietly erased the chat the user had just finished, and the
-    #    sidebar could never show more than the current conversation.
-    new_conv = svc.start_new(g.user)
+    #    First, check if there's an existing empty conversation we can reuse.
+    recent_page = svc.list_recent(g.user, limit=5)
+    reusable_conv_id = None
+    
+    for c in recent_page.conversations:
+        msgs = svc.list_messages(c.id)
+        # Reusable if there are no user messages
+        if not any(m.role == "user" for m in msgs):
+            reusable_conv_id = c.id
+            break
 
-    # 3. Return the new id. The client used to send conversation_id=null on the
-    #    next turn and let the server pick "most recent active" -- now that the
-    #    previous conversation is still active, that guess would resume it.
+    if reusable_conv_id:
+        new_conv_id = str(reusable_conv_id)
+        # Clean up any existing assistant messages in the reused conversation
+        # so it is a truly clean slate (prevents wrong agent greeting showing up).
+        db_session = g.db_session
+        from sqlalchemy import text
+        db_session.execute(text("DELETE FROM messages WHERE conversation_id = :cid"), {"cid": reusable_conv_id})
+        db_session.execute(text("UPDATE conversations SET message_count = 0 WHERE id = :cid"), {"cid": reusable_conv_id})
+        db_session.commit()
+    else:
+        new_conv = svc.start_new(g.user)
+        new_conv_id = str(new_conv.id)
+
+    # 3. Return the new id.
     return jsonify({
         "status": "success",
-        "conversation_id": str(new_conv.id),
+        "conversation_id": new_conv_id,
     })
