@@ -158,13 +158,27 @@ class MitraChannel:
         # §1.1 -- Mitra never acks. Wait for one if it ever appears
         # (defensive, for a future Mitra release), otherwise just settle.
         deadline = time.monotonic() + spec.handshake.settle_ms / 1000
+        # Poll in slices rather than blocking for the whole settle window, so a
+        # socket that dies mid-handshake is noticed within ~50ms instead of only
+        # at the next loop iteration.
+        POLL_SLICE_S = 0.05
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                # RE-CHECK before declaring the handshake settled. The closed
+                # check below only ran while time remained, so a connection that
+                # dropped during settling took this branch and the channel was
+                # handed back as if authenticated -- the first
+                # send_and_await_turn then wrote to a dead socket. The reader
+                # thread sets _closed asynchronously, so which of the two
+                # branches saw it first was pure timing; the test for this was
+                # correspondingly flaky rather than reliably red.
+                if self._closed.is_set():
+                    raise MitraChannelClosed(self._close_reason)
                 return
             if self._closed.is_set():
                 raise MitraChannelClosed(self._close_reason)
-            f = self._try_get(timeout=remaining)
+            f = self._try_get(timeout=min(remaining, POLL_SLICE_S))
             if f is None:
                 continue
             if f.source in spec.handshake.ack_types:

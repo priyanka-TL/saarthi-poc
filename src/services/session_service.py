@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -67,23 +67,60 @@ class SessionService:
         self._conversations = ConversationRepository(session)
         self._audit = AuditLogRepository(session)
 
-    def open_for(self, conversation_id: uuid.UUID, agent) -> Optional[AgentSessionDTO]:
-        """Attach the existing open session for this conversation if one
-        exists (uq_sess_one_open_per_conv guarantees at most one, regardless
-        of which agent it belongs to -- the caller is trusted to have already
-        ensured the right agent is pinned before reaching here). Otherwise,
-        create one in 'pending' only if the agent declares pin_session;
-        stateless agents get no session at all.
+    def open_for(
+        self,
+        conversation_id: uuid.UUID,
+        agent,
+        on_displace: Optional[Callable[[uuid.UUID], None]] = None,
+    ) -> Optional[AgentSessionDTO]:
+        """Attach the existing open session for this conversation if it belongs
+        to `agent`; otherwise create one in 'pending', but only if the agent
+        declares pin_session (stateless agents get no session at all).
+
+        A SESSION IS NEVER SHARED ACROSS AGENTS. uq_sess_one_open_per_conv
+        allows at most one open session per conversation but says nothing about
+        whose it is, and this method used to hand back whichever one it found --
+        its docstring delegated the agent check to the caller, but RouterService
+        Gate 1 (explicit selection from the UI) returns an agent without ever
+        consulting the pin, so nothing enforced it.
+
+        The effect was a genuine cross-agent hijack: with `currentAgentKey`
+        still set to capture_discussion, opening a Record Stories conversation
+        from the sidebar sent the next turn to record_stories'
+        remote_session_id, while RemoteFlowAgentHandler overwrote
+        remote_bot_route with MITRA_DISCUSSION_BOT_ROUTE and apply() stamped
+        remote_flow='guest-discussion' onto a 'guest-mi-story' session. A later
+        finalize would then submit the wrong flow to Mitra for that story.
+
+        A conversation legitimately spanning several agents is the intended
+        product model, so a mismatch ABANDONS the other agent's session and
+        starts a fresh one rather than refusing the turn. `on_displace` is
+        invoked with the conversation id when that happens, so the caller can
+        close the orphaned Mitra channel (this layer owns no socket).
         """
         existing = self._sessions.get_open_for_conversation(conversation_id)
         if existing is not None:
-            return existing
+            agent_id = self._as_uuid(agent.id)
+            if existing.agent_id == agent_id:
+                return existing
+
+            # Different agent: retire the old session before opening a new one.
+            self.abandon(conversation_id, reason="agent_switch")
+            if on_displace is not None:
+                on_displace(conversation_id)
 
         if not agent.spec.routing.pin_session:
             return None
 
-        agent_id = agent.id if isinstance(agent.id, uuid.UUID) else uuid.UUID(str(agent.id))
-        return self._sessions.create_pending(conversation_id, agent_id)
+        remote = getattr(agent.spec, "remote", None)
+        language = getattr(remote, "default_language", "en") if remote else "en"
+        return self._sessions.create_pending(
+            conversation_id, self._as_uuid(agent.id), language=language,
+        )
+
+    @staticmethod
+    def _as_uuid(value) -> uuid.UUID:
+        return value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
 
     def _check_transition(self, current_state: str, target_state: str, session_id: uuid.UUID) -> None:
         if target_state not in ALLOWED.get(current_state, set()):

@@ -24,3 +24,7 @@ pytest-cov
 responses
 PyJWT
 import-linter
+# scripts/verify_discussion_report.py only -- the app must never import this.
+# A blank report PDF is invisible to every in-app check (Mitra returns 200 with
+# a valid, empty file), so verifying it means extracting the text.
+pypdf

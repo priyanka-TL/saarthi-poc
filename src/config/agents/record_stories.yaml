@@ -32,7 +32,6 @@ remote:
   # exist, and is what the Node bot uses for this flow too.
   # Move back to /api/end-story/v2/ once Mitra registers the Flow row.
   finalize_path: /api/end-story/
-  report_path: /api/get-story/
   report_media_type: application/pdf
 
 routing:

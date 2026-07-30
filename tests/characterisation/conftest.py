@@ -36,11 +36,27 @@ def golden():
     return _load
 
 
-def chat(client, message: str, agent_name: str | None = None):
-    """POST one turn and return (status_code, body)."""
+def chat(
+    client,
+    message: str,
+    agent_name: str | None = None,
+    conversation_id: str | None = None,
+    autostart: bool = False,
+):
+    """POST one turn and return (status_code, body).
+
+    `conversation_id` continues an existing conversation instead of resolving
+    "most recent active"; `autostart` marks the message as the UI's own canned
+    opener rather than something the user typed (it must not title the
+    conversation).
+    """
     payload: dict = {"message": message}
     if agent_name is not None:
         payload["agent_name"] = agent_name
+    if conversation_id is not None:
+        payload["conversation_id"] = conversation_id
+    if autostart:
+        payload["autostart"] = True
     response = client.post("/api/chat", json=payload)
     return response.status_code, response.get_json()
 

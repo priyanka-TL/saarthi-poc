@@ -95,7 +95,16 @@ class ConversationService:
 
     def start_new(self, user: UserContext) -> ConversationDTO:
         """Begins a fresh conversation, leaving the previous one in the user's
-        history. See ConversationRepository.create_new."""
+        history. See ConversationRepository.create_new.
+
+        Reuses an existing empty conversation when the user already has one, so
+        pressing "New chat" (or clicking a capability button) several times in a
+        row does not leave a dead row behind each time. An empty conversation is
+        already a clean slate -- there is nothing to erase.
+        """
+        existing = self._conv_repo.find_empty_for_user(user)
+        if existing is not None:
+            return existing
         return self._conv_repo.create_new(user)
 
     def reset(self, conversation_id: uuid.UUID) -> None:

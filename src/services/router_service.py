@@ -40,6 +40,13 @@ class AgentNotFound(Exception):
         self.key = key
 
 
+# Stripped from both ends of a candidate command before comparing it to an exit
+# keyword, so "Stop." and "/exit!" still match while the comparison itself stays
+# an exact one (see _is_exit for why precision matters here). Referenced by
+# _normalise_command; its absence raised NameError on every Gate 2 turn.
+_COMMAND_PUNCTUATION = " \t\r\n'\"`.,!?;:…-–—()[]{}"
+
+
 def _as_text(msg: AIMessage) -> str:
     content = msg.content
     if isinstance(content, list):
@@ -73,17 +80,22 @@ class RouterService:
         # GATE 1 -- explicit selection from the UI
         if explicit_key:
             a = self._registry.get(explicit_key)  # accepts key OR legacy display name
-            if a and a.spec.routing.direct_selectable:
-                return RouteDecision(a, "explicit", 1.0, 0)
-            raise AgentNotFound(explicit_key)  # -> HTTP 404
+            if not (a and a.spec.routing.direct_selectable):
+                raise AgentNotFound(explicit_key)  # -> HTTP 404
+            # An exit command must work even when the client names an agent.
+            # The UI sends agent_key on EVERY message while a capability panel
+            # is open, so a Gate-2-only exit check meant "/exit" was dead on the
+            # one path users actually take -- it was only reachable after a
+            # reload had cleared the client's agent key.
+            if self._is_exit(ctx.text, a.spec.routing.exit_keywords):
+                return self._exit_to_default(conv)
+            return RouteDecision(a, "explicit", 1.0, 0)
 
         # GATE 2 -- session pin. THE FIX.
         pin = self._pin_for(conv)
         if pin:
             if self._is_exit(ctx.text, pin.spec.routing.exit_keywords):
-                self._session_service.abandon(conv.id, reason="user_exit")
-                self._conversations.unpin(conv.id)
-                return RouteDecision(self._registry.default(), "exit_to_default", 1.0, 0, unpinned=True)
+                return self._exit_to_default(conv)
             return RouteDecision(pin, "pinned", 1.0, 0)  # <- ZERO LLM calls
 
         # GATE 3 -- deterministic keyword pre-route
@@ -112,6 +124,14 @@ class RouterService:
     # ------------------------------------------------------------------
     # Gate 2 helpers
     # ------------------------------------------------------------------
+
+    def _exit_to_default(self, conv) -> RouteDecision:
+        """Abandon the open session, unpin, and hand the turn to the default
+        agent. Shared by Gate 1 and Gate 2 so an exit command behaves
+        identically whether or not the client named an agent."""
+        self._session_service.abandon(conv.id, reason="user_exit")
+        self._conversations.unpin(conv.id)
+        return RouteDecision(self._registry.default(), "exit_to_default", 1.0, 0, unpinned=True)
 
     def _pin_for(self, conv) -> Optional[RegisteredAgent]:
         """conversations.pinned_agent_id OR an open agent_sessions row --

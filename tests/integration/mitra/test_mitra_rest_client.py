@@ -331,6 +331,62 @@ def test_finalize_defaults_to_v2_when_no_path_is_given():
 
 
 @resp_lib.activate
+def test_finalize_as_guest_sends_a_null_access_token_and_no_header_on_v1():
+    """THE regression pin for the blank Capture Discussion PDF.
+
+    Mitra sets `auth = access_token is not None` and picks the PDF template's
+    user_type (AUTH vs GUEST) from it. A guest flow finalised WITH a token
+    therefore looks up a template nobody registered, get_html_from_template
+    returns "", and save_project_story hands that to Gotenberg -- which renders
+    an empty page and returns 200. Blank PDF, no error, every check green.
+
+    This body is byte-identical to Mitra's own client for the flow
+    (storyPostSessionService._callEndStory): access_token null, Origin only.
+    """
+    resp_lib.add(
+        resp_lib.POST, f"{BASE_URL}/api/end-story/",
+        json=_load("end_story_v2.json"), status=200,
+    )
+
+    _client().finalize(
+        "sess", "prof", "guest-discussion", "en", "tok",
+        path="/api/end-story/", as_guest=True,
+    )
+
+    call = resp_lib.calls[0]
+    _assert_origin_sent(call)
+    body = json.loads(call.request.body)
+    assert body["access_token"] is None, (
+        "an explicit null, not an omitted key -- this mirrors the Node client"
+    )
+    assert "Authorization" not in call.request.headers
+    # Everything else is unchanged by as_guest.
+    assert body["session"] == "sess"
+    assert body["profile_id"] == "prof"
+    assert body["stage"] == "COMPLETED"
+    assert body["flow"] == "guest-discussion"
+    assert body["language"] == "en"
+
+
+@resp_lib.activate
+def test_finalize_as_guest_sends_no_bearer_on_v2_either():
+    """as_guest is about token presence, not about which endpoint. v2 reads the
+    token from the header, so suppressing it there means sending no header at
+    all -- otherwise flipping only finalize_path would silently re-authenticate
+    a guest flow."""
+    resp_lib.add(
+        resp_lib.POST, f"{BASE_URL}/api/end-story/v2/",
+        json=_load("end_story_v2.json"), status=200,
+    )
+
+    _client().finalize("sess", "prof", "guest-discussion", "en", "tok", as_guest=True)
+
+    call = resp_lib.calls[0]
+    assert "Authorization" not in call.request.headers
+    assert "access_token" not in json.loads(call.request.body)
+
+
+@resp_lib.activate
 def test_finalize_raises_on_missing_id():
     """If Mitra omits 'id' from the response, raise MitraError."""
     resp_lib.add(

@@ -164,7 +164,26 @@ class RemoteSpec(BaseModel):
     # (they resolve the story bot from different Mitra tables), not a version
     # preference -- see MitraRestClient's module docstring.
     finalize_path:     Literal["/api/end-story/", "/api/end-story/v2/"] = "/api/end-story/v2/"
-    report_path:       str = "/api/get-story/"
+    # Finalize WITHOUT a user token -- v1 sends `access_token: null` in the
+    # body, v2 sends no Authorization header.
+    #
+    # Not a security knob: Mitra derives `auth = access_token is not None`
+    # (shikshalokam_story_utils.get_html_from_template) and uses it to pick the
+    # PDF template's user_type (AUTH vs GUEST). A guest flow finalised WITH a
+    # token therefore looks up a template that was never registered, and
+    # get_html_from_template returns "" -- which save_project_story hands to
+    # Gotenberg, producing a VALID BUT BLANK PDF with no error anywhere. That
+    # is exactly how Capture Discussion shipped empty reports.
+    #
+    # It must match what MitraChannel._authenticate sends on the WebSocket
+    # (`access_token: None` -- ws_channel.py). Interviewing as a guest and
+    # finalising as an authenticated user is the mismatch, not either half.
+    finalize_as_guest: bool = False
+    # NOT report_path. MitraRestClient.get_report hardcodes /api/get-story/ and
+    # never consulted this field, so setting it did nothing while looking like
+    # it did. Silently-ignored config is worse than absent config -- if the
+    # report endpoint ever needs to vary per agent, add it back together with
+    # the code that reads it.
     report_media_type: str = "application/pdf"
 
 class RemoteFlowAgentSpec(BaseAgentSpec):

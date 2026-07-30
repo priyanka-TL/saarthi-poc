@@ -1217,3 +1217,34 @@ body {
 .error-content {
     color: var(--message-system-text);
 }
+
+/* Breadcrumb Navigation */
+.breadcrumb-nav {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-size: 0.85rem;
+    color: var(--sidebar-text-dim);
+}
+
+.breadcrumb-item {
+    padding: 4px 12px;
+    border-radius: 16px;
+    background: var(--input-bg);
+    border: 1px solid var(--border-color);
+    color: var(--text-color);
+    font-weight: 500;
+}
+
+.breadcrumb-item.active {
+    background: var(--primary-color);
+    color: #fff;
+    border-color: var(--primary-color);
+}
+
+.breadcrumb-separator {
+    display: flex;
+    align-items: center;
+    color: var(--sidebar-text-dim);
+}

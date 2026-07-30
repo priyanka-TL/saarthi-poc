@@ -34,7 +34,10 @@ class _FakeMitraRest:
         self.chat_rows = []
         self.recent_chat_calls = []
 
-    def finalize(self, session_id, profile_id, flow, language, token, path="/api/end-story/v2/"):
+    def finalize(
+        self, session_id, profile_id, flow, language, token,
+        path="/api/end-story/v2/", as_guest=False,
+    ):
         self.finalize_calls.append((session_id, profile_id, flow, language, token))
         return self.story_id, "narrative content"
 

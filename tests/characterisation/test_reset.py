@@ -167,7 +167,18 @@ def test_reset_drops_history_from_subsequent_llm_calls(client, script):
     assert not any("remember this" in str(m.content) for m in second_call)
 
 
-def test_reset_is_idempotent(client):
+def test_repeated_reset_reuses_the_same_empty_conversation(client):
+    """Pressing "New chat" repeatedly must not leave a dead row behind each time.
+
+    This used to assert the opposite -- that every reset hands back a DISTINCT
+    conversation -- and that is precisely what filled the database with empty
+    shells: 47 of 68 active conversations on the dev database had never held a
+    message. They are invisible (list_for_user filters message_count > 0) but
+    they accumulate without bound.
+
+    An empty conversation is already a clean slate, so there is nothing to
+    reset: handing the same one back is the correct answer, not a compromise.
+    """
     seen = []
     for _ in range(3):
         response = client.post("/api/reset")
@@ -176,4 +187,33 @@ def test_reset_is_idempotent(client):
         assert body["status"] == "success"
         seen.append(body["conversation_id"])
 
-    assert len(set(seen)) == 3, "each reset must hand back a distinct conversation"
+    assert len(set(seen)) == 1, (
+        "consecutive resets with nothing typed in between must reuse the same "
+        f"empty conversation, got {len(set(seen))} distinct ids"
+    )
+
+
+def test_reset_after_a_real_turn_starts_a_new_conversation(client, script):
+    """The other half: once a conversation has been used, reset must leave it in
+    history and move on -- otherwise "New chat" would dump the user back into
+    the conversation they just finished."""
+    from tests.characterisation.conftest import DEFAULT_AGENT, chat
+
+    script.queue("ok")
+    _, body = chat(client, "something I actually said", DEFAULT_AGENT)
+    used_conv_id = body["conversation_id"]
+
+    fresh = client.post("/api/reset").get_json()["conversation_id"]
+    assert fresh != used_conv_id
+
+    # And the used conversation is still listed, not archived away.
+    listed = client.get("/api/conversations?limit=20").get_json()["conversations"]
+    assert used_conv_id in [c["id"] for c in listed]
+
+
+def test_reset_rejects_a_malformed_conversation_id(client):
+    """This route has no exception handler of its own, so uuid.UUID()'s
+    ValueError escaped as a bare 500."""
+    response = client.post("/api/reset", json={"conversation_id": "not-a-uuid"})
+    assert response.status_code == 400
+    assert response.get_json()["error_code"] == "INVALID_REQUEST"

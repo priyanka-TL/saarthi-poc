@@ -59,11 +59,16 @@ def _make_agent(
     spec_remote_flow="guest-mi-story",
     spec_report_media="application/pdf",
     spec_finalize_path="/api/end-story/",
+    spec_finalize_as_guest=False,
 ):
     agent = MagicMock()
     agent.spec.remote.flow_name = spec_remote_flow
     agent.spec.remote.report_media_type = spec_report_media
     agent.spec.remote.finalize_path = spec_finalize_path
+    # Set explicitly: a MagicMock would auto-create a TRUTHY attribute here, so
+    # these tests would silently assert a guest finalisation while claiming to
+    # cover record_stories, which sends its token.
+    agent.spec.remote.finalize_as_guest = spec_finalize_as_guest
     return agent
 
 
@@ -166,6 +171,20 @@ class TestConcurrentFinalisation:
         orch._finalize(session_dto, agent, user)
 
         assert mitra_rest.finalize.call_args.kwargs["path"] == "/api/end-story/"
+
+    def test_finalize_passes_the_agents_token_presence_choice_through(self):
+        """_finalize must pass spec.remote.finalize_as_guest through too.
+
+        Mitra derives `auth = access_token is not None` and picks the PDF
+        template's user_type from it, so getting this wrong does not fail the
+        call -- it renders an EMPTY pdf and returns 200. record_stories sends
+        its token (False); capture_discussion does not (True).
+        """
+        orch, agent, session_dto, _, mitra_rest, _, _, user = self._setup_winner_loser()
+
+        orch._finalize(session_dto, agent, user)
+
+        assert mitra_rest.finalize.call_args.kwargs["as_guest"] is False
 
     def test_report_fetch_failure_still_completes_the_session(self):
         """A failing get_report must NOT undo a successful finalize.

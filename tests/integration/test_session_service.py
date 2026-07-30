@@ -112,6 +112,88 @@ def test_open_for_attaches_existing_open_session():
         session.close()
 
 
+def test_open_for_never_hands_one_agents_session_to_another():
+    """THE cross-agent hijack regression.
+
+    open_for used to return whichever open session the conversation had,
+    "regardless of which agent it belongs to", trusting the caller to have
+    pinned the right agent first. RouterService Gate 1 (explicit selection from
+    the UI) never consults the pin, so with currentAgentKey still set to
+    capture_discussion, opening a Record Stories conversation from the sidebar
+    ran the next turn against the STORY session's remote_session_id -- and
+    RemoteFlowAgentHandler then overwrote its remote_bot_route and remote_flow
+    with the discussion agent's.
+
+    A conversation spanning several agents is intended, so the old session is
+    abandoned rather than the turn refused.
+    """
+    session = SessionLocal()
+    try:
+        story_agent_id = _insert_agent_row(session, f"agent_{uuid.uuid4().hex[:8]}")
+        discussion_agent_id = _insert_agent_row(session, f"agent_{uuid.uuid4().hex[:8]}")
+        conv_id = _new_conversation(session)
+        svc = SessionService(session)
+
+        story_session = svc.open_for(conv_id, _RegisteredAgentStub(story_agent_id, pin_session=True))
+        # Give it a remote handle, exactly as a first turn would.
+        svc.apply(story_session, SessionDelta(
+            state=SessionState.awaiting_user,
+            remote_session_id="story-remote-sid",
+            remote_flow="guest-mi-story",
+        ))
+        session.commit()
+
+        displaced: list[uuid.UUID] = []
+        discussion_session = svc.open_for(
+            conv_id,
+            _RegisteredAgentStub(discussion_agent_id, pin_session=True),
+            on_displace=displaced.append,
+        )
+        session.commit()
+
+        assert discussion_session is not None
+        assert discussion_session.id != story_session.id, "adopted the other agent's session"
+        assert discussion_session.agent_id == discussion_agent_id
+        assert discussion_session.remote_session_id is None, (
+            "the new agent inherited the other agent's Mitra session id"
+        )
+        assert displaced == [conv_id], "the orphaned Mitra channel was not closed"
+
+        # The story session is retired, and its remote handle is untouched.
+        retired = AgentSessionRepository(session).get(story_session.id)
+        assert retired.state == "abandoned"
+        assert retired.remote_session_id == "story-remote-sid"
+        assert retired.remote_flow == "guest-mi-story"
+    finally:
+        session.close()
+
+
+def test_open_for_same_agent_still_resumes_without_displacing():
+    """The multi-turn interview path must be unaffected: a second turn for the
+    SAME agent attaches to the same session, remote handle intact."""
+    session = SessionLocal()
+    try:
+        agent_id = _insert_agent_row(session, f"agent_{uuid.uuid4().hex[:8]}")
+        conv_id = _new_conversation(session)
+        svc = SessionService(session)
+        agent = _RegisteredAgentStub(agent_id, pin_session=True)
+
+        first = svc.open_for(conv_id, agent)
+        svc.apply(first, SessionDelta(
+            state=SessionState.awaiting_user, remote_session_id="keep-me",
+        ))
+        session.commit()
+
+        displaced: list[uuid.UUID] = []
+        second = svc.open_for(conv_id, agent, on_displace=displaced.append)
+
+        assert second.id == first.id
+        assert second.remote_session_id == "keep-me"
+        assert displaced == []
+    finally:
+        session.close()
+
+
 # ---------------------------------------------------------------------------
 # apply(): invalid transitions rejected, same-state updates allowed
 # ---------------------------------------------------------------------------

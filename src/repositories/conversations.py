@@ -1,8 +1,10 @@
+import json
 import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import func, select, update
+from sqlalchemy import Text, cast, func, literal, select, update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from src.db.models import Conversation, ConversationStatusEnum
@@ -44,9 +46,17 @@ class ConversationRepository:
         if conv:
             return ConversationDTO.model_validate(conv)
 
-        # Not found -> Create new
+        # Not found -> Create new, ALWAYS with a server-generated id.
+        #
+        # This used to reuse the caller's `conversation_id` as the primary key,
+        # which made the id a client-controlled value: a stale
+        # sessionStorage.saarthi_cid (different login, rebuilt database, an id
+        # copied from elsewhere) was silently resurrected as a brand-new
+        # conversation, and an id that already existed under another tenant hit
+        # the primary key and surfaced as an IntegrityError 500 instead of a
+        # clean miss.
         new_conv = Conversation(
-            id=conversation_id or uuid.uuid4(),
+            id=uuid.uuid4(),
             tenant_code=user.tenant_code,
             organization_id=user.active_org_id,
             external_user_id=user.user_id,
@@ -86,6 +96,34 @@ class ConversationRepository:
         self._session.refresh(new_conv)
         return ConversationDTO.model_validate(new_conv)
 
+    def find_empty_for_user(self, user: UserContext) -> Optional[ConversationDTO]:
+        """The user's newest conversation that has never held a message, or None.
+
+        "New chat" pressed repeatedly used to leave one dead row behind per
+        press -- 47 of 68 active conversations on the dev database were empty
+        shells. They are invisible (list_for_user filters message_count > 0) but
+        they accumulate forever and every one of them is a row that "most recent
+        active" resolution has to sort past.
+
+        /api/reset tried to solve this by scanning list_for_user for a
+        conversation with no user messages, which can never match: that query
+        already requires message_count > 0, and a conversation only gets there
+        by way of a user message. So the reuse path never once executed -- and
+        the dead code inside it ran `DELETE FROM messages`, a table that does
+        not exist (it is `conversation_messages`), so the day it did match it
+        would have 500ed. Asking the right question instead makes both problems
+        go away: an empty conversation needs no clean-up at all.
+        """
+        stmt = select(Conversation).where(
+            Conversation.tenant_code == user.tenant_code,
+            Conversation.external_user_id == user.user_id,
+            Conversation.status == ConversationStatusEnum.active,
+            Conversation.message_count == 0,
+        ).order_by(Conversation.created_at.desc()).limit(1)
+
+        conv = self._session.execute(stmt).scalar_one_or_none()
+        return ConversationDTO.model_validate(conv) if conv else None
+
     def get_scoped(self, conversation_id: uuid.UUID, user: UserContext) -> Optional[ConversationDTO]:
         """Like get_or_create's lookup half, but never creates on a miss --
         session routes need a genuine 404 on an unknown id or a wrong tenant,
@@ -111,6 +149,52 @@ class ConversationRepository:
         )
         result = self._session.execute(stmt).scalar_one()
         return result
+
+    # Marks a title that was generated for the user rather than taken from
+    # something they said, so the first real user message may still replace it.
+    # Without this, an autostart interview's placeholder ("Capture Discussions —
+    # 30 Jul 07:48") would win permanently, because touch() COALESCEs.
+    PLACEHOLDER_TITLE_FLAG = "title_is_placeholder"
+
+    def set_placeholder_title(self, id: uuid.UUID, title: str) -> None:
+        """Give an untitled conversation a provisional name, flagged so the
+        first thing the user actually types can take it over."""
+        stmt = (
+            update(Conversation)
+            .where(Conversation.id == id, Conversation.title.is_(None))
+            .values(
+                title=title,
+                # json.dumps, not the dict itself: the bind has to reach psycopg
+                # as text for the ::jsonb cast to adapt it.
+                metadata_=Conversation.metadata_.op("||")(
+                    cast(literal(json.dumps({self.PLACEHOLDER_TITLE_FLAG: True})), JSONB)
+                ),
+            )
+        )
+        self._session.execute(stmt)
+
+    def replace_placeholder_title(self, id: uuid.UUID, title: str) -> None:
+        """Promote the user's own words over a placeholder, once.
+
+        A no-op when the title is real (the flag is absent) or when there is no
+        title yet, so it composes with touch()'s COALESCE rather than fighting
+        it: touch() sets a first real title, this upgrades a placeholder, and
+        neither can overwrite a title the user's own words already produced.
+        """
+        stmt = (
+            update(Conversation)
+            .where(
+                Conversation.id == id,
+                Conversation.metadata_[self.PLACEHOLDER_TITLE_FLAG].astext == "true",
+            )
+            .values(
+                title=title,
+                metadata_=Conversation.metadata_.op("-")(
+                    cast(literal(self.PLACEHOLDER_TITLE_FLAG), Text)
+                ),
+            )
+        )
+        self._session.execute(stmt)
 
     def touch(self, id: uuid.UUID, title_from: Optional[str] = None) -> None:
         """

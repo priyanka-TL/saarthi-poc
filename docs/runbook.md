@@ -107,3 +107,81 @@ WHERE action IN ('config_sync', 'config_create', 'config_activate', 'agent_enabl
   AND created_at > now() - INTERVAL '7 days'
 ORDER BY created_at DESC;
 ```
+
+### 7. How many empty shell conversations are there, and how do I clear them?
+A conversation that never held a message. `/api/reset` used to create one on
+every "New chat" press and every capability-button click, so they accumulated
+without bound -- 47 of 68 active conversations on the dev database at the time
+this was found. They are invisible in the UI (the sidebar query filters
+`message_count > 0`) but every one of them is a row that "most recent active"
+resolution sorts past.
+
+`ConversationService.start_new` now reuses an existing empty conversation
+instead of adding another, so this only needs running once to clear the backlog.
+
+```sql
+-- Count them first.
+SELECT count(*) AS empty_shells
+FROM conversations
+WHERE status = 'active' AND message_count = 0;
+
+-- Archive, never delete: agent_sessions and audit_logs may reference them, and
+-- "disable, never delete" is the convention everywhere else in this schema.
+UPDATE conversations
+SET status = 'archived', updated_at = now()
+WHERE status = 'active'
+  AND message_count = 0
+  AND NOT EXISTS (
+      SELECT 1 FROM conversation_messages m WHERE m.conversation_id = conversations.id
+  );
+```
+
+The `NOT EXISTS` guard is not redundant: `message_count` is a counter, not a
+derived value, so a row where the two disagree is a data-integrity problem to
+investigate rather than something to archive silently. Query 8 finds those.
+
+### 8. Does any conversation's message_count disagree with its actual messages?
+`message_count` doubles as the message `seq` allocator (`next_seq_for_update`),
+and `uq_msg_seq` is UNIQUE on `(conversation_id, seq)` -- so a counter that has
+drifted BELOW the real row count means the next message will collide on that
+constraint and every further turn in that conversation fails.
+
+```sql
+SELECT c.id, c.message_count, count(m.id) AS actual_messages
+FROM conversations c
+LEFT JOIN conversation_messages m ON m.conversation_id = c.id
+GROUP BY c.id, c.message_count
+HAVING c.message_count <> count(m.id)
+ORDER BY count(m.id) - c.message_count DESC;
+```
+
+### 9. Is a Capture Discussion report PDF actually populated?
+**No in-app check can answer this.** Mitra returns a story id, creates the
+StoryMedia row, answers `GET /api/get-story/` with 200 and serves a
+downloadable file -- and the file is blank whenever
+`get_html_from_template` returns `""` (no `PDFTemplates` row matches the flow
+and user_type) because `save_project_story` renders that empty string through
+Gotenberg, which reports success. Saarthi only ever sees the URL.
+
+The report is only reachable through Mitra's **v1** pipeline
+(`/api/end-story/` -> `save_chaupal_report` -> `get_mom_report_html`), and only
+when finalised **without a token** (Mitra picks the template's `user_type` from
+token presence). Both are pinned in `capture_discussion.yaml` as
+`finalize_path` + `finalize_as_guest`.
+
+To verify a real session end-to-end:
+
+```bash
+python scripts/verify_discussion_report.py --session <mitra_session_id>
+```
+
+It asserts the chaupal `other_params` shape, downloads the PDF and extracts its
+text, then checks the title, location, organization, participants and **every**
+challenge and solution appear in it. Exit 0 = populated, 1 = not populated,
+2 = no story/PDF at all. Run it after any change to those two settings or to a
+Mitra-side PDF template.
+
+First triage question if it fails: does `other_params` contain `location`? If
+not, the discussion finalised through v2's generic pipeline
+(`save_generic_story` treats `location` as a Story column and never copies it
+into `other_params`), and no PDF fix will help until the endpoint is corrected.
