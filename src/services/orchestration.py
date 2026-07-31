@@ -1,7 +1,10 @@
 import os
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Optional, List, Any
+
+from sqlalchemy import text as sql_text
 
 from src.agents.protocol import TurnContext, AgentSessionView, Option, SessionDelta, SessionState
 from src.domain.sessions import AgentSessionDTO
@@ -29,6 +32,14 @@ def _conversation_title(text: str) -> str:
     """The conversation title is the first user message, truncated per contract
     (<=60 chars, else 57 + an ellipsis)."""
     return text if len(text) <= TITLE_MAX_LEN else text[:TITLE_TRUNCATE_AT] + "..."
+
+
+def _agent_fallback_title(agent) -> str:
+    """Title for a conversation opened by an autostart turn, where there is no
+    user text to name it after. Dated so several interviews with the same agent
+    stay distinguishable in the sidebar -- which is the whole point, since
+    titling them from the canned opener made them all identical."""
+    return _conversation_title(f"{agent.name} — {datetime.now(timezone.utc):%d %b %H:%M}")
 
 
 def _to_session_view(dto: AgentSessionDTO) -> AgentSessionView:
@@ -66,6 +77,12 @@ class TurnInput:
     text: str
     option_id: Optional[str] = None
     agent_key: Optional[str] = None
+    # True when the UI sent this message on the user's behalf to open an
+    # interview (a capability button's data-autostart). It is a real turn -- the
+    # remote flow needs it -- but it is not something the user typed, so it must
+    # never become the conversation's title. Every Capture Discussion in the
+    # sidebar was titled "I want to capture a discussion" because of this.
+    autostart: bool = False
 
 @dataclass
 class ResumeResult:
@@ -85,9 +102,71 @@ class TurnResult:
     turn: Any
     session: Optional[AgentSessionView]
 
-class RateLimitsDummy:
-    def check(self, conv_id, user, limits):
-        pass
+class ConcurrentTurnError(Exception):
+    """Another request is already running a turn on this conversation.
+
+    Surfaced as HTTP 409, never retried automatically: the whole point is that
+    the duplicate must not reach Mitra, where two user messages in a row merge
+    into one and destroy an answer (§1.6).
+    """
+    def __init__(self, conversation_id):
+        super().__init__(f"a turn is already in flight for conversation {conversation_id}")
+        self.conversation_id = conversation_id
+
+
+class TurnLimitExceeded(Exception):
+    """The agent's configured limits refuse this turn. Surfaced as HTTP 429."""
+    def __init__(self, reason: str, detail: str):
+        super().__init__(detail)
+        self.reason = reason
+        self.detail = detail
+
+
+class RateLimits:
+    """Enforces LimitsSpec. This was a no-op stub (`RateLimitsDummy`), so every
+    `limits:` block in every agent YAML was decorative -- max_turns and both
+    rate limits were declared, validated, checksummed into the config table,
+    and then never consulted. An interview had no turn ceiling at all.
+
+    Deliberately cheap: two indexed counts against tables the turn is about to
+    write to anyway. No Redis, no in-process state (which would be wrong the
+    moment there is a second worker).
+    """
+
+    def __init__(self, db, sessions_repo):
+        self._db = db
+        self._sessions = sessions_repo
+
+    def check(self, conv_id, user, limits) -> None:
+        if limits is None:
+            return
+
+        max_turns = getattr(limits, "max_turns", None)
+        if max_turns:
+            open_session = self._sessions.get_open_for_conversation(conv_id)
+            if open_session is not None and open_session.turn_count >= max_turns:
+                raise TurnLimitExceeded(
+                    "max_turns",
+                    f"This interview has reached its limit of {max_turns} turns.",
+                )
+
+        per_min = getattr(limits, "rate_limit_per_conversation_per_min", None)
+        if per_min:
+            recent = self._db.execute(
+                sql_text(
+                    "SELECT count(*) FROM conversation_messages "
+                    "WHERE conversation_id = :cid AND role = 'user' "
+                    "AND created_at > now() - interval '1 minute'"
+                ),
+                {"cid": str(conv_id)},
+            ).scalar() or 0
+            # The current turn's user message is already inserted by the time
+            # check() runs, so `>` not `>=`: a limit of 20 must allow the 20th.
+            if recent > per_min:
+                raise TurnLimitExceeded(
+                    "rate_limit_per_conversation_per_min",
+                    "You're sending messages too quickly. Please wait a moment.",
+                )
 
 class OrchestrationService:
     def __init__(
@@ -116,16 +195,33 @@ class OrchestrationService:
 
         self._router = router_service or RouterService(session, registry, llm_factory)
 
-        # Dummy for missing rate-limits component
-        self._rate_limits = RateLimitsDummy()
+        self._rate_limits = RateLimits(session, self._sessions_repo)
 
     def handle_turn(self, ctx_in: TurnInput) -> TurnResult:
         # 1. get_or_create conv
         conv = self._conversations.get_or_create(ctx_in.conversation_id, ctx_in.user)
 
+        # 1b. CLAIM THE TURN, covering the handler call too.
+        #
+        # Step 2's row lock is released by the COMMIT at step 9, which happens
+        # BEFORE the handler runs -- so two concurrent posts for one
+        # conversation both sailed through and both called Mitra. On a first
+        # turn that meant two upsert_profile + generate_session pairs and an
+        # orphaned remote session; on a later turn it is §1.6 answer
+        # destruction, since two user messages in a row silently merge in
+        # Mitra's database. Claimed here, before the user message is written,
+        # so a refused turn leaves nothing behind.
+        if not self._try_lock_conversation(conv.id):
+            raise ConcurrentTurnError(conv.id)
+        try:
+            return self._handle_turn_locked(ctx_in, conv)
+        finally:
+            self._unlock_conversation(conv.id)
+
+    def _handle_turn_locked(self, ctx_in: TurnInput, conv) -> TurnResult:
         # 2. allocate seq under a row lock — also serialises double-submits (§1.6)
         seq = self._conversations.next_seq_for_update(conv.id)
-        
+
         # 3. insert user message
         self._messages.insert(
             conv.id, seq, role="user", content=ctx_in.text,
@@ -139,7 +235,24 @@ class OrchestrationService:
         # in the sidebar as "New conversation / No messages yet" even though the
         # user had clearly said something. touch() COALESCEs the title, so the
         # first message still wins and step 14 remains harmless.
-        self._conversations.touch(conv.id, title_from=_conversation_title(ctx_in.text))
+        #
+        # An AUTOSTART turn timestamps but does not title: its text is the UI's
+        # canned opener, so titling from it gave every discussion in the sidebar
+        # the identical, useless name "I want to capture a discussion". The
+        # first thing the user actually types titles the conversation instead,
+        # and _agent_fallback_title covers the case where the interview is
+        # answered entirely with option buttons.
+        if ctx_in.autostart:
+            self._conversations.touch(conv.id)
+        else:
+            self._conversations.touch(conv.id, title_from=_conversation_title(ctx_in.text))
+            # If an autostart turn left a placeholder title behind, this is the
+            # first thing the user has actually said -- promote it. touch()'s
+            # COALESCE cannot do this on its own, and without it every
+            # discussion would keep the generated name forever.
+            self._conversations.replace_placeholder_title(
+                conv.id, _conversation_title(ctx_in.text),
+            )
 
         # 4. route (v2: 5 gates)
         # Build partial context for router
@@ -170,8 +283,14 @@ class OrchestrationService:
         # 5. enforce limits
         self._rate_limits.check(conv.id, ctx_in.user, agent.spec.limits)
 
-        # 6. open the session
-        session_view = self._sessions.open_for(conv.id, agent)
+        # 6. open the session. on_displace fires when the conversation had an
+        #    open session belonging to a DIFFERENT agent: that session is
+        #    abandoned, and its Mitra socket has to go with it or the pool would
+        #    hand the new agent a channel still authenticated against the old
+        #    agent's remote session.
+        session_view = self._sessions.open_for(
+            conv.id, agent, on_displace=self._close_remote_channel,
+        )
 
         # 7. apply the pin
         if agent.spec.routing.pin_session:
@@ -248,7 +367,18 @@ class OrchestrationService:
         # 14. refresh last_message_at now the turn actually completed. The
         #     title was already set at step 3b and touch() COALESCEs it, so
         #     passing it again cannot overwrite the original.
-        self._conversations.touch(conv.id, title_from=_conversation_title(ctx_in.text))
+        #
+        #     On an autostart turn step 3b passed no title, so the conversation
+        #     is still untitled here. Give it the agent's own name rather than
+        #     leaving it to render as "New conversation" -- an interview
+        #     answered entirely with option buttons may never produce a typed
+        #     message at all. It is written as a PLACEHOLDER, so the first thing
+        #     the user does type replaces it (step 3b above).
+        if ctx_in.autostart:
+            self._conversations.touch(conv.id)
+            self._conversations.set_placeholder_title(conv.id, _agent_fallback_title(agent))
+        else:
+            self._conversations.touch(conv.id, title_from=_conversation_title(ctx_in.text))
         self._db.commit()
         
         return TurnResult(
@@ -260,6 +390,66 @@ class OrchestrationService:
             session=session_view
         )
         
+    def _is_postgres(self) -> bool:
+        try:
+            return self._db.get_bind().dialect.name == "postgresql"
+        except Exception:
+            return False
+
+    def _turn_lock_key(self, conversation_id: uuid.UUID) -> str:
+        return f"saarthi:turn:{conversation_id}"
+
+    def _try_lock_conversation(self, conversation_id: uuid.UUID) -> bool:
+        """Claim the right to run a turn on this conversation. False if another
+        request already holds it.
+
+        SESSION-scoped (pg_try_advisory_lock), not transaction-scoped, and
+        deliberately so. A transaction-scoped lock would have to stay open
+        across handler.handle(), and handler.handle() is a Mitra round trip of
+        up to 60s -- holding a database transaction (and its pooled connection)
+        for that long is exactly what test_no_transaction_held_during_handler
+        exists to prevent. A session-scoped lock spans the commit at step 9
+        without keeping a transaction open, so it can guard the handler call
+        without reintroducing that problem.
+
+        NON-BLOCKING, so a genuine double-submit is refused rather than queued
+        and then executed a second time. Queueing would be the wrong answer
+        anyway: the second copy of the same answer is exactly what triggers
+        Mitra's consecutive-same-sender merge and destroys the first (§1.6).
+        """
+        if not self._is_postgres():
+            return True  # sqlite (unit tests) has no advisory locks
+        return bool(self._db.execute(
+            sql_text("SELECT pg_try_advisory_lock(hashtext(:key))"),
+            {"key": self._turn_lock_key(conversation_id)},
+        ).scalar())
+
+    def _unlock_conversation(self, conversation_id: uuid.UUID) -> None:
+        """Release the turn lock. Required: a session-scoped advisory lock is
+        NOT released by commit, rollback, or by the connection being returned
+        to the pool -- only by an explicit unlock or the connection actually
+        closing."""
+        if not self._is_postgres():
+            return
+        try:
+            self._db.execute(
+                sql_text("SELECT pg_advisory_unlock(hashtext(:key))"),
+                {"key": self._turn_lock_key(conversation_id)},
+            )
+        except Exception as e:
+            logger.warning("failed to release turn lock for %s: %s", conversation_id, e)
+
+    def _close_remote_channel(self, conversation_id: uuid.UUID) -> None:
+        """Drop this conversation's pooled Mitra socket. Best-effort: the DB
+        change that prompted it is already committed-or-committing, and a
+        socket that fails to close is reaped by MitraSessionManager anyway."""
+        if self._mitra_sessions is None:
+            return
+        try:
+            self._mitra_sessions.close(conversation_id)
+        except Exception as e:
+            logger.warning("failed to close Mitra channel for %s: %s", conversation_id, e)
+
     # ------------------------------------------------------------------
     # Lost-turn recovery (see src/integrations/mitra/turn_recovery.py)
     # ------------------------------------------------------------------
@@ -433,6 +623,11 @@ class OrchestrationService:
                 # docstring. Sending a flow to the endpoint that cannot
                 # resolve it is a deterministic HTTP 500.
                 path=agent.spec.remote.finalize_path,
+                # Also per-agent: Mitra turns token presence into auth=True and
+                # picks the PDF template's user_type from it, so a guest flow
+                # finalised with a token renders a BLANK pdf rather than
+                # failing. Must match the socket's `access_token: None`.
+                as_guest=agent.spec.remote.finalize_as_guest,
             )
         except Exception as e:
             # Don't leave the session stuck in 'finalizing' forever -- that

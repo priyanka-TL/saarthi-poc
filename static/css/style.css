@@ -591,6 +591,16 @@ body {
     display: flex;
     flex-direction: column;
     margin: 16px 24px;
+    overflow: hidden;
+}
+
+/* The chat window is its own card, separated from the header/breadcrumb
+   banner above by the page background showing through the gap -- not one
+   continuous card sharing a single border. */
+.chat-window-card {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
     border: 1px solid var(--border-color);
     border-radius: 12px;
     background: var(--card-bg);
@@ -599,13 +609,77 @@ body {
 }
 
 .active-context-banner {
-    padding: 16px 20px;
-    background: #fdfaf6;
-    border-bottom: 1px solid var(--border-color);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    background: #ffffff;
+    overflow: hidden;
+    margin-bottom: 20px;
+    transition: all 0.3s ease;
 }
 
 .active-context-banner.hidden {
     display: none;
+}
+
+/* Workflow Header Collapsible System */
+.workflow-header-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 20px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.workflow-header-title {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.workflow-title-text {
+    font-weight: 500;
+    font-size: 0.875rem;
+    color: #1a1a1a;
+}
+
+.workflow-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.workflow-stop-text {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+}
+
+.workflow-chevron {
+    color: var(--text-secondary);
+    transition: transform 0.3s ease;
+}
+
+.collapsible-container.collapsed .workflow-chevron {
+    transform: rotate(-90deg); /* points right */
+}
+
+.collapsible-content {
+    display: grid;
+    grid-template-rows: 1fr;
+    transition: grid-template-rows 0.3s ease, padding 0.3s ease;
+}
+
+.collapsible-inner {
+    overflow: hidden;
+    padding: 0 20px 10px 20px; /* bottom padding only, top comes from header */
+}
+
+.collapsible-container.collapsed .collapsible-content {
+    grid-template-rows: 0fr;
+}
+
+.collapsible-container.collapsed .collapsible-inner {
+    padding-bottom: 0;
 }
 
 .context-banner-top {
@@ -1216,4 +1290,66 @@ body {
 
 .error-content {
     color: var(--message-system-text);
+}
+
+/* Breadcrumb Navigation */
+.breadcrumb-nav {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+}
+
+.breadcrumb-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 16px;
+    border-radius: 999px;
+    background: transparent;
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    font-weight: 500;
+    transition: all 0.2s ease;
+}
+
+.breadcrumb-item.active {
+    background: rgba(31, 111, 92, 0.07);
+    border-color: rgba(26, 77, 58, 0.18);
+    color: #1a1a1a;
+}
+
+.breadcrumb-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: transparent;
+    border: 1.5px solid #c9c4bd;
+}
+
+.breadcrumb-item.active .breadcrumb-dot {
+    background: #1e5c43;
+    border-color: #1e5c43;
+    animation: pulse-green 2s infinite ease-in-out;
+}
+
+@keyframes pulse-green {
+    0% {
+        box-shadow: 0 0 0 0 rgba(30, 92, 67, 0.4);
+    }
+    70% {
+        box-shadow: 0 0 0 4px rgba(30, 92, 67, 0);
+    }
+    100% {
+        box-shadow: 0 0 0 0 rgba(30, 92, 67, 0);
+    }
+}
+
+.breadcrumb-separator {
+    display: flex;
+    align-items: center;
+    color: #c9c4bd;
 }

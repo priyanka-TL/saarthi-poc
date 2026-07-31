@@ -108,10 +108,20 @@
                     <!--
                         data-agent-key drives routing — NOT the title text (§10.3 bug fix).
                         "Listening at Scale" is a marketing label; stop deriving agent
-                        selection from it. The card AND button both carry data-agent-key
-                        so either click target activates the same agent.
+                        selection from it.
+
+                        It lives on the ACTION BUTTONS ONLY, never on the card.
+                        The card used to carry data-agent-key="record_stories"
+                        while containing BOTH buttons, so any click in its
+                        padding, title, description or badge -- a few pixels off
+                        the "Capture Discussions" button -- reset the
+                        conversation and pinned Record Stories instead. With no
+                        data-agent-label on the card either, the banner then
+                        read "record_stories Context" (the raw routing key).
+                        The card now falls through to the generic display-only
+                        handler, which must never drive routing.
                     -->
-                    <div class="capability-card" data-agent-key="record_stories">
+                    <div class="capability-card">
                         <div class="capability-header">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                                 stroke-linecap="round" stroke-linejoin="round" width="18" height="18"
@@ -176,16 +186,35 @@
             </button>
 
             <div class="chat-inner-box">
-                <div id="active-context-banner" class="active-context-banner">
-                    <div class="context-banner-top">
-                        <span class="context-pill primary">Context: <span id="context-name">Home</span></span>
-                        <span class="context-pill secondary">Sub-context: <span id="sub-context-name">–</span></span>
+                <div id="active-context-banner" class="active-context-banner collapsible-container expanded hidden">
+                    <div class="workflow-header-top" onclick="toggleWorkflowBanner()">
+                        <div class="workflow-header-title">
+                            <svg class="workflow-icon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#4e2277" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M6 3v12" />
+                                <circle cx="6" cy="18" r="3" />
+                                <path d="M6 9a9 9 0 0 1 9 9" />
+                                <circle cx="15" cy="21" r="3" />
+                            </svg>
+                            <span id="workflow-title-text" class="workflow-title-text">Workflow Progress</span>
+                        </div>
+                        <div class="workflow-header-actions">
+                            <span id="workflow-stop-text" class="workflow-stop-text"></span>
+                            <svg id="workflow-chevron" class="workflow-chevron" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <polyline points="6 9 12 15 18 9"></polyline>
+                            </svg>
+                        </div>
                     </div>
-                    <div class="context-banner-desc">
-                        Story flow keeps context sticky so your narrative capture remains consistent.
+                    <div class="collapsible-content">
+                        <div class="collapsible-inner">
+                            <div id="context-banner-top" class="context-banner-top breadcrumb-nav">
+                                <span class="context-pill primary">Context: <span id="context-name">Home</span></span>
+                                <span class="context-pill secondary">Sub-context: <span id="sub-context-name">–</span></span>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
+                <div class="chat-window-card">
                 <main id="chat-messages" class="chat-messages">
                     <div class="message system">
                         <div class="message-avatar">
@@ -226,6 +255,7 @@
                         </button>
                     </form>
                 </footer>
+                </div>
             </div>
         </div>
         <!-- Mobile Overlay -->

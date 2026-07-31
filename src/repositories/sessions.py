@@ -71,12 +71,22 @@ class AgentSessionRepository:
         ).scalars().all()
         return [AgentSessionDTO.model_validate(row) for row in rows]
 
-    def create_pending(self, conversation_id: uuid.UUID, agent_id: uuid.UUID) -> AgentSessionDTO:
-        """No remote_* columns are known yet at creation time."""
+    def create_pending(
+        self, conversation_id: uuid.UUID, agent_id: uuid.UUID, language: str = "en",
+    ) -> AgentSessionDTO:
+        """No remote_* columns are known yet at creation time.
+
+        `language` is the agent's configured default. It used to fall through to
+        the column's server_default ('en') on every session, which meant
+        RemoteSpec.default_language was never read by anything -- an agent
+        configured for hi/kn/te still opened its Mitra channel with route='en',
+        because MitraChannel._authenticate sends this column's value.
+        """
         row = AgentSession(
             conversation_id=conversation_id,
             agent_id=agent_id,
             state=SessionStateEnum.pending,
+            language=language,
         )
         self._session.add(row)
         self._session.flush()

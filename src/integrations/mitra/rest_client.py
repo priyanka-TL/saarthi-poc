@@ -55,6 +55,37 @@ it lands in the view's generic `except Exception` -> HTTP 500. It is a
 CONFIGURATION error reported as a server error; it is deterministic, not a
 race. Which endpoint each agent uses is therefore per-agent config
 (``spec.remote.finalize_path``), not a global constant.
+
+THE ENDPOINT ALSO SELECTS THE PDF RENDERER
+==========================================
+The bot-resolution difference above is not the only consequence, and for
+`guest-discussion` it is not even the important one. The two views run two
+different story-and-PDF pipelines, and only v1 knows the chaupal (discussion)
+flow exists:
+
+  v1  create_story_object: flow == GuestDiscussion -> save_chaupal_report
+      -> save_shikshalokam_story -> get_story_html -> get_mom_report_html
+      = the populated minutes-of-meeting report.
+
+  v2  generate_story: NO chaupal branch. Always save_generic_story
+      -> save_project_story -> get_html_from_template, which returns ""
+      when no PDFTemplates row matches the flow -- and save_project_story
+      passes that "" to Gotenberg, which renders an empty page and returns
+      HTTP 200.
+
+So a v2 finalisation of a chaupal flow yields a story, a StoryMedia row, a
+200 from get-story and a downloadable file that is COMPLETELY BLANK, with
+nothing logged anywhere. Choosing the endpoint is choosing the renderer.
+
+WHY ``as_guest`` EXISTS
+=======================
+Mitra derives ``auth = access_token is not None`` and uses it to pick the PDF
+template's ``user_type`` (AUTH vs GUEST). Presenting a token on a guest flow
+therefore looks up a template nobody registered and lands in the same empty
+-> blank-PDF branch. It must match what MitraChannel._authenticate sends on
+the socket (``access_token: None``): interviewing as a guest and finalising as
+an authenticated user is the mismatch, not either half. Per-agent via
+``spec.remote.finalize_as_guest``.
 """
 from __future__ import annotations
 
@@ -253,12 +284,14 @@ class MitraRestClient:
         language: str,
         token: str,
         path: str = FINALIZE_V2_PATH,
+        as_guest: bool = False,
     ) -> tuple[str, str]:
         """Submit the completed session for story synthesis.
 
         ``path`` comes from ``spec.remote.finalize_path`` and selects the
-        endpoint — see "WHICH FINALIZE ENDPOINT" in the module docstring for
-        why that is per-agent and not a constant.
+        endpoint — see "WHICH FINALIZE ENDPOINT" and "THE ENDPOINT ALSO SELECTS
+        THE PDF RENDERER" in the module docstring for why that is per-agent and
+        not a constant.
 
         IMPORTANT — v2 vs v1 difference (§1.5):
           v2 reads the token from the ``Authorization: Bearer`` header.
@@ -266,6 +299,13 @@ class MitraRestClient:
         The token placement follows ``path`` automatically. Sending the v1
         body shape to v2 leaves the call unauthenticated (v2 never reads the
         body key) and vice versa, so these two must never be set separately.
+
+        ``as_guest`` (from ``spec.remote.finalize_as_guest``) suppresses the
+        token entirely — ``access_token: null`` in the v1 body, no
+        ``Authorization`` header on v2 — for flows Mitra treats as guest
+        flows. ``token`` is still accepted and simply unused, so callers need
+        no branching. See "WHY ``as_guest`` EXISTS" in the module docstring:
+        this is a PDF-template selector on Mitra's side, not an auth decision.
 
         Returns:
             (story_id, content) where story_id is the Mitra Story.id.
@@ -284,9 +324,12 @@ class MitraRestClient:
         }
         extra_headers = None
         if _is_v2_finalize(path):
-            extra_headers = {"Authorization": f"Bearer {token}"}
+            if not as_guest:
+                extra_headers = {"Authorization": f"Bearer {token}"}
         else:
-            payload["access_token"] = token
+            # Explicit null, not an omitted key: this mirrors the Node client's
+            # body byte-for-byte, and v1 reads the key with .get() either way.
+            payload["access_token"] = None if as_guest else token
 
         data = self._request("POST", path, json=payload, extra_headers=extra_headers)
         story_id = str(data.get("id", ""))

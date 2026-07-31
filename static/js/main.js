@@ -2,6 +2,16 @@ document.addEventListener('DOMContentLoaded', () => {
     const chatForm = document.getElementById('chat-form');
     const userInput = document.getElementById('user-input');
     const chatMessages = document.getElementById('chat-messages');
+
+    // Make toggle function globally available for onclick handlers in index.html
+    window.toggleWorkflowBanner = function() {
+        const banner = document.getElementById('active-context-banner');
+        if (banner) {
+            banner.classList.toggle('collapsed');
+            banner.classList.toggle('expanded');
+        }
+    };
+
     const typingIndicator = document.getElementById('typing-indicator');
     const agentList = document.getElementById('agent-list');
     const recentConversationsList = document.getElementById('recent-conversations-list');
@@ -104,14 +114,151 @@ document.addEventListener('DOMContentLoaded', () => {
     //   'Saarthi' magic string removed; routing never derived from display text.
     let currentAgentKey = null;
 
-    function setContextBanner(label, subLabel) {
+    // -----------------------------------------------------------------------
+    // Per-conversation mutable state.
+    //
+    // Declared HERE, not next to sendMessage() 700 lines down, because the
+    // page-load restore below calls loadConversationHistory() synchronously and
+    // that function now resets these. A `let` further down the same scope would
+    // put them in the temporal dead zone at that point -- a ReferenceError that
+    // only fires on the reload path, i.e. exactly the path least likely to be
+    // exercised by hand.
+    // -----------------------------------------------------------------------
+    let lastAgent = null;
+    // Last sent text, for the Retry button (UPSTREAM_TIMEOUT is safe to retry
+    // because the session persists in awaiting_user — §10.3 change 6).
+    let _lastSentText = '';
+    // Id of the remote_flow session in play, if any. Its PRESENCE is what makes
+    // a blind re-send unsafe -- see _renderErrorWithRetry. It belongs to ONE
+    // conversation and must be cleared by every path that switches conversation.
+    let _lastSessionId = null;
+    // Key of the agent that owns the session in play, so completion copy is
+    // chosen from the agent key rather than its display name (which has already
+    // been renamed once).
+    let _lastSessionAgentKey = null;
+    // A turn is in flight. Guards EVERY entry point into sendMessage -- typed
+    // submit, option click, autostart -- plus the handlers that switch or reset
+    // the conversation underneath one. userInput.disabled only ever covered the
+    // typed path.
+    let _busy = false;
+
+    // §10.3 change 5: session state UI — finalizing / completed / report
+    // A SET, not a single handle. _handleSession and _pollReport both used to
+    // assign to one shared variable, so whichever started last was the only one
+    // that could ever be cleared -- and a conversation with more than one
+    // session still awaiting its PDF leaked an interval per session, each
+    // writing into a DOM node that had already been discarded.
+    // Declared here to avoid Temporal Dead Zone (ReferenceError) when 
+    // loadConversationHistory is called on page reload.
+    const _pollSessionTimers = new Set();
+
+    function _trackPoll(timerId) {
+        _pollSessionTimers.add(timerId);
+        return timerId;
+    }
+
+    function _clearSessionPoll() {
+        _pollSessionTimers.forEach(clearInterval);
+        _pollSessionTimers.clear();
+    }
+
+    function setContextBanner(label, subLabel, stops = null, title = null, currentIndex = 0) {
         const banner = document.getElementById('active-context-banner');
-        const contextNameEl = document.getElementById('context-name');
-        const subContextNameEl = document.getElementById('sub-context-name');
-        if (banner && contextNameEl && subContextNameEl) {
-            contextNameEl.textContent = label === 'Home' ? label : label + ' Context';
-            subContextNameEl.textContent = subLabel || label;
-            banner.classList.remove('hidden');
+        const bannerTop = document.getElementById('context-banner-top');
+        const titleEl = document.getElementById('workflow-title-text');
+        const stopEl = document.getElementById('workflow-stop-text');
+        if (!banner || !bannerTop) return;
+
+        banner.classList.remove('hidden');
+        
+        if (titleEl) {
+            titleEl.textContent = title || "Workflow Progress";
+        }
+        
+        if (stopEl && stops && stops.length > 0) {
+            // Using 1-based index if currentIndex is 0-based, or just use what server sends
+            const displayIndex = (currentIndex || 0) + 1;
+            stopEl.textContent = `Stop ${displayIndex} of ${stops.length}`;
+        } else if (stopEl) {
+            stopEl.textContent = "";
+        }
+
+        // Built as DOM nodes rather than an innerHTML string: agent display
+        // names are admin-authored, but they are still data flowing from the
+        // server into markup, and the rest of this file is deliberately
+        // textContent-disciplined (see the conversation-title render below).
+        bannerTop.innerHTML = '';
+
+        if (stops && stops.length > 0) {
+            stops.forEach((stop, index) => {
+                const isActive = index === stops.length - 1;
+
+                const item = document.createElement('span');
+                item.className = `breadcrumb-item ${isActive ? 'active' : ''}`;
+
+                // The dot indicator is an empty element drawn entirely in CSS
+                // (filled for the current stop, hollow for the ones behind it),
+                // so the label keeps its own node and stays textContent-only.
+                const dot = document.createElement('span');
+                dot.className = 'breadcrumb-dot';
+                item.appendChild(dot);
+
+                const labelEl = document.createElement('span');
+                labelEl.className = 'breadcrumb-label';
+                labelEl.textContent = stop;
+                item.appendChild(labelEl);
+
+                bannerTop.appendChild(item);
+
+                if (!isActive) {
+                    const sep = document.createElement('span');
+                    sep.className = 'breadcrumb-separator';
+                    sep.innerHTML = `
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                          <polyline points="9 18 15 12 9 6"></polyline>
+                        </svg>`;
+                    bannerTop.appendChild(sep);
+                }
+            });
+        } else {
+            const displayLabel = label === 'Home' ? label : label + ' Context';
+            const displaySubLabel = subLabel || label;
+
+            const primary = document.createElement('span');
+            primary.className = 'context-pill primary';
+            primary.append('Context: ');
+            const primaryValue = document.createElement('span');
+            primaryValue.id = 'context-name';
+            primaryValue.textContent = displayLabel;
+            primary.appendChild(primaryValue);
+
+            const secondary = document.createElement('span');
+            secondary.className = 'context-pill secondary';
+            secondary.append('Sub-context: ');
+            const secondaryValue = document.createElement('span');
+            secondaryValue.id = 'sub-context-name';
+            secondaryValue.textContent = displaySubLabel;
+            secondary.appendChild(secondaryValue);
+
+            bannerTop.append(primary, secondary);
+        }
+    }
+
+    // The ONE place a server `flow` payload becomes the header, so the
+    // live-turn path and the resume path cannot drift apart again -- they did,
+    // and that is exactly why reopening a conversation from history lost its
+    // breadcrumb: only sendMessage() ever passed `stops`.
+    //
+    // Falls back to the flat Context/Sub-context pills only when the server
+    // sent no journey at all, i.e. a conversation with no assistant messages.
+    function applyFlowBanner(agentName, flow, fallbackSubLabel) {
+        const stops = flow && Array.isArray(flow.stops) ? flow.stops : null;
+        if (stops && stops.length > 0) {
+            setContextBanner(agentName, agentName, stops, flow.title, flow.current_index);
+        } else if (agentName) {
+            setContextBanner(agentName, fallbackSubLabel || agentName);
+        } else {
+            setContextBanner('Home', '–');
         }
     }
 
@@ -135,31 +282,47 @@ document.addEventListener('DOMContentLoaded', () => {
         el.addEventListener('click', async (e) => {
             e.stopPropagation();   // prevent generic card handler from winning
 
-            // AWAIT. resetConversation() only assigns the new conversationId
-            // AFTER its `await fetch('/api/reset')` resolves. Called without
-            // await, this handler ran straight past it and sendMessage() below
-            // posted the autostart message with the PREVIOUS conversation id --
-            // so opening this panel wrote its first turn into whatever
-            // conversation was already open, including a completed story.
-            // Awaiting also orders the reset's own `currentAgentKey = null`
-            // BEFORE the assignment below, instead of clobbering it after.
-            await resetConversation();
-            clearActiveItems();
-            const card = el.closest('.capability-card, .highlight-card');
-            if (card) card.classList.add('active');
+            // RE-ENTRANCY GUARD. This handler is async and nothing stopped it
+            // running twice: a double-click fired two resetConversation()s, so
+            // two conversations were created and the first handler's autostart
+            // was posted into the conversation the second reset had already
+            // replaced. `_busy` also covers the window while the autostart turn
+            // itself is in flight.
+            if (_busy || el.dataset.pending === '1') return;
+            el.dataset.pending = '1';
 
-            currentAgentKey = el.dataset.agentKey;
-            setContextBanner(el.dataset.agentLabel || el.dataset.agentKey, 'Story capture');
+            try {
+                // AWAIT. resetConversation() only assigns the new conversationId
+                // AFTER its `await fetch('/api/reset')` resolves. Called without
+                // await, this handler ran straight past it and sendMessage() below
+                // posted the autostart message with the PREVIOUS conversation id --
+                // so opening this panel wrote its first turn into whatever
+                // conversation was already open, including a completed story.
+                // Awaiting also orders the reset's own `currentAgentKey = null`
+                // BEFORE the assignment below, instead of clobbering it after.
+                await resetConversation();
+                clearActiveItems();
+                const card = el.closest('.capability-card, .highlight-card');
+                if (card) card.classList.add('active');
 
-            if (window.innerWidth <= 768) {
-                sidebar.classList.remove('active');
-                sidebarOverlay.classList.remove('active');
-            }
+                currentAgentKey = el.dataset.agentKey;
+                setContextBanner(el.dataset.agentLabel || el.dataset.agentKey, 'Story capture');
 
-            // data-autostart: send the opening message automatically so the
-            // user doesn't have to type anything to start the interview.
-            if (el.dataset.autostart) {
-                sendMessage(el.dataset.autostart);
+                if (window.innerWidth <= 768) {
+                    sidebar.classList.remove('active');
+                    sidebarOverlay.classList.remove('active');
+                }
+
+                // data-autostart: send the opening message automatically so the
+                // user doesn't have to type anything to start the interview.
+                // Flagged as autostart so the server neither titles the
+                // conversation from it nor stores it as the user's own words --
+                // it is a UI affordance, not something the user said.
+                if (el.dataset.autostart) {
+                    await sendMessage(el.dataset.autostart, null, { autostart: true });
+                }
+            } finally {
+                delete el.dataset.pending;
             }
         });
     });
@@ -168,6 +331,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // §10.3: this handler must NEVER drive routing — that's the bug we fixed above.
     document.querySelectorAll('.capability-card:not([data-agent-key]), .highlight-card').forEach(card => {
         card.addEventListener('click', async () => {
+            if (_busy) return;
             // Awaited for the same reason as above: reset clears the message
             // pane and the agent key only after its fetch resolves, so an
             // un-awaited call lands those side effects on whatever the user
@@ -225,6 +389,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 `;
 
                 li.addEventListener('click', async () => {
+                    if (_busy) return;
                     // Awaited: without it, resetConversation()'s late
                     // `currentAgentKey = null` overwrote the assignment below,
                     // so the next message routed as "route me" instead of the
@@ -258,7 +423,12 @@ document.addEventListener('DOMContentLoaded', () => {
     async function loadRecentConversations() {
         if (!recentConversationsList) return;
         try {
-            const response = await fetch('/api/conversations?limit=5');
+            // 20 is the server's own cap (chat_routes.list_conversations). At
+            // the previous 5, all but the newest handful of a user's
+            // conversations were simply unreachable from the UI -- there is no
+            // other way in. Paging past 20 needs a "Load more" affordance and
+            // the keyset cursor ConversationRepository already supports.
+            const response = await fetch('/api/conversations?limit=20');
             const data = await response.json();
 
             recentConversationsList.innerHTML = '';
@@ -289,6 +459,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 li.appendChild(descDiv);
 
                 li.addEventListener('click', () => {
+                    // Switching conversations mid-turn would leave the in-flight
+                    // reply to render into the wrong transcript.
+                    if (_busy) return;
                     clearActiveItems();
                     li.classList.add('active');
                     loadConversationHistory(conv.id);
@@ -301,9 +474,38 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 recentConversationsList.appendChild(li);
             });
+
+            // The list is rebuilt from scratch on every load, so the highlight
+            // has to be reapplied. Previously only a click ever set it, which
+            // meant a restored-on-reload conversation was open in the pane with
+            // nothing in the sidebar showing which one it was.
+            _highlightActiveConversation();
         } catch (error) {
             console.error('Failed to load recent conversations:', error);
         }
+    }
+
+    // Marks the sidebar row for `conversationId`, if it is currently listed.
+    // Safe to call before the list has loaded -- it simply finds nothing, and
+    // loadRecentConversations calls it again once the rows exist.
+    function _highlightActiveConversation() {
+        if (!recentConversationsList) return;
+        recentConversationsList.querySelectorAll('.agent-item').forEach(el => {
+            el.classList.toggle('active', !!conversationId && el.dataset.id === conversationId);
+        });
+    }
+
+    // Drop a conversation id that the server no longer recognises, and put the
+    // pane back to the Home greeting. Leaving a dead id in sessionStorage meant
+    // the next message carried it to /api/chat, which created a brand-new
+    // conversation using that caller-supplied primary key.
+    function _forgetConversation() {
+        conversationId = null;
+        sessionStorage.removeItem('saarthi_cid');
+        chatMessages.innerHTML = '';
+        addMessage('Namaste. How can I help you today?', 'system');
+        setContextBanner('Home', '–');
+        clearActiveItems();
     }
 
     loadRecentConversations();
@@ -399,6 +601,19 @@ document.addEventListener('DOMContentLoaded', () => {
     //     3. DISABLE THE WHOLE GROUP — §1.6: two user messages in a row silently
     //        collapse in Mitra's DB. A double-submit destroys an answer.
     // -----------------------------------------------------------------------
+    // Retire EVERY choice group in the pane. Called before each send, because
+    // renderOptions only ever disabled the group whose button was clicked: a
+    // question answered by typing instead left its buttons live indefinitely,
+    // and clicking one of them later submitted that stale answer against
+    // whatever step the interview had since moved to -- the same §1.6 answer
+    // destruction the option group's own click handler guards against.
+    function _disableAllOptions() {
+        document.querySelectorAll('#chat-messages .option-btn').forEach(b => {
+            b.disabled = true;
+            b.classList.add('option-btn--used');
+        });
+    }
+
     function renderOptions(options, messageDiv, { readOnly = false, selectedId = null } = {}) {
         if (!options || options.length === 0) return;
 
@@ -421,12 +636,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (opt.id === selectedId) btn.classList.add('option-btn--selected');
             } else {
                 btn.addEventListener('click', () => {
-                    // Disable the whole group immediately — before the POST —
-                    // so a slow network can't allow a double-click to go through.
-                    group.querySelectorAll('.option-btn').forEach(b => {
-                        b.disabled = true;
-                        b.classList.add('option-btn--used');
-                    });
+                    // A turn already in flight: do nothing at all, and in
+                    // particular do NOT echo the label, or the transcript would
+                    // show an answer that was never sent.
+                    if (_busy) return;
+                    // Disable every group immediately — before the POST — so a
+                    // slow network can't allow a double-click to go through.
+                    // sendMessage does this too; doing it here as well closes
+                    // the window between the click and sendMessage's own guard.
+                    _disableAllOptions();
 
                     addMessage(opt.label, 'user');
                     sendMessage(opt.value, opt.id);
@@ -451,9 +669,33 @@ document.addEventListener('DOMContentLoaded', () => {
     // already claimed reload-restore worked; this is what makes that true).
     // -----------------------------------------------------------------------
     async function loadConversationHistory(id) {
+        // Switching conversations is exactly the same state boundary that
+        // resetConversation() guards, and everything it clears has to be
+        // cleared here too. Left behind, `_lastSessionId` pointed at the
+        // PREVIOUS conversation's interview, so a timeout in this one offered
+        // "Check for reply" and POST /api/sessions/{other_id}/resume happily
+        // wrote a recovered turn into the conversation the user had left.
+        _clearSessionPoll();
+        _lastSessionId = null;
+        _lastSessionAgentKey = null;
+        lastAgent = null;
+        // Resuming means "let the server route me". The old comment below said
+        // this already, but leaving a stale value in place meant a resumed
+        // Record Stories conversation could be posted to with
+        // agent_key=capture_discussion -- see SessionService.open_for.
+        currentAgentKey = null;
+
         try {
             const response = await fetch(`/api/conversations/${id}/messages`);
-            if (!response.ok) return;
+            if (!response.ok) {
+                // A 404 means the stored id is dead (different login, wiped
+                // database, someone else's conversation). Returning silently
+                // left it in sessionStorage, so the next message re-sent it and
+                // the server materialised a NEW conversation under that
+                // caller-supplied id. Forget it and fall back to Home.
+                if (response.status === 404) _forgetConversation();
+                return;
+            }
             const data = await response.json();
 
             chatMessages.innerHTML = '';
@@ -483,18 +725,26 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             });
 
-            // Deliberately does NOT set currentAgentKey -- the backend's own
+            // currentAgentKey stays null (cleared above) -- the backend's own
             // session-pin state already drives routing for the next real
             // message correctly; duplicating that decision here would just be
             // a second, driftable copy of server-side truth.
             conversationId = id;
             sessionStorage.setItem('saarthi_cid', id);
+            _highlightActiveConversation();
 
-            if (lastAgentName) {
-                setContextBanner(lastAgentName, 'Resumed conversation');
-            } else {
-                setContextBanner('Home', '–');
-            }
+            // Restore the speaker the transcript ended on. Without this the
+            // next reply always looked like a switch, so every resumed
+            // conversation opened with a spurious "Switched context to Capture
+            // Discussions" pill.
+            lastAgent = lastAgentName;
+
+            // Restore the FULL agent journey, not just the speaker the
+            // transcript ended on. The server derives `flow` from the same
+            // message sequence it uses on a live turn, so a reopened
+            // conversation shows the identical breadcrumb it had when it was
+            // last active -- and so does a page reload, which lands here too.
+            applyFlowBanner(lastAgentName, data.flow, 'Resumed conversation');
 
             // Replay the session state the transcript cannot carry. The
             // completion notice is generated, not stored, so without this a
@@ -503,11 +753,21 @@ document.addEventListener('DOMContentLoaded', () => {
             // `lastAgent`, which is still null on a fresh load.
             const sessions = data.sessions || [];
 
-            // EVERY finished session gets its report link back, not just the
-            // most recent one. A conversation that moved on to another agent
-            // used to hide the completed story's Download PDF button entirely.
+            // EVERY finished session gets its completion notice back, not just
+            // the most recent one. A conversation that moved on to another
+            // agent used to hide the completed story's Download PDF button.
+            //
+            // And NOT only the ones that already have a report_url. Finalising
+            // deliberately completes with report_url = null when Mitra's PDF
+            // generation lags -- OrchestrationService._finalize says so in as
+            // many words -- so requiring one here meant that refreshing in the
+            // gap between "interview finished" and "PDF ready" showed no
+            // completion notice, no download, no polling and no error. The user
+            // was told nothing at all, while GET /api/sessions/{id}/report
+            // would have served the report moments later.
+            // _renderCompletedUI already handles the null case by polling.
             sessions.forEach(s => {
-                if (s.state === 'completed' && s.report_url) {
+                if (s.state === 'completed') {
                     _renderCompletedUI(
                         s,
                         agentNameBySession.get(s.id) || lastAgentName,
@@ -521,11 +781,13 @@ document.addEventListener('DOMContentLoaded', () => {
             const latest = sessions[sessions.length - 1];
             if (latest && latest.state === 'finalizing') {
                 _lastSessionId = latest.id;
+                _lastSessionAgentKey = latest.agent_key || null;
                 _handleSession(latest, agentNameBySession.get(latest.id) || lastAgentName);
             } else if (latest && latest.state !== 'completed') {
                 // An interview mid-flight: remember it so a timeout recovers
                 // via /resume instead of re-sending (§1.6).
                 _lastSessionId = latest.id;
+                _lastSessionAgentKey = latest.agent_key || null;
             }
 
             scrollToBottom();
@@ -535,16 +797,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // -----------------------------------------------------------------------
-    // §10.3 change 5: session state UI — finalizing / completed / report
-    // -----------------------------------------------------------------------
-    let _pollSessionTimer = null;
-
-    function _clearSessionPoll() {
-        if (_pollSessionTimer !== null) {
-            clearInterval(_pollSessionTimer);
-            _pollSessionTimer = null;
-        }
-    }
 
     function _renderFinalizingUI() {
         const notice = document.createElement('div');
@@ -603,7 +855,13 @@ document.addEventListener('DOMContentLoaded', () => {
         let readyText = '✅ Your story is ready.';
         let checkingText = 'Your story is ready. Checking for the PDF report…';
 
-        if (attribution === 'Capture Discussions') {
+        // agent_key, NOT the display name. This branched on the literal string
+        // 'Capture Discussions', and this agent has already been renamed once
+        // ("Capture Discussion" -> "Capture Discussions"); the next rename would
+        // have silently reverted discussions to "Your story is ready." with no
+        // test to catch it. Both payloads that carry a session carry agent_key.
+        const agentKey = session.agent_key || _lastSessionAgentKey;
+        if (agentKey === 'capture_discussion') {
             readyText = '✅ Your discussion report is ready.';
             checkingText = 'Your discussion report is ready. Checking for the PDF report…';
         }
@@ -616,8 +874,13 @@ document.addEventListener('DOMContentLoaded', () => {
             if (anchorEl) anchorEl.after(msg);
             _appendReportAction(msg, session.report_url);
         } else {
-            // Report still generating — show a "checking…" message and poll
+            // Report still generating — show a "checking…" message and poll.
+            // anchorEl applies here too: on a history replay this branch is now
+            // reachable for a session that finished earlier in a conversation
+            // which has since moved on, and an unanchored notice would land
+            // under a different agent's messages.
             const pollMsg = addMessage(checkingText, 'system', attribution);
+            if (anchorEl) anchorEl.after(pollMsg);
             _pollReport(session.id, pollMsg, readyText);
         }
     }
@@ -626,10 +889,18 @@ document.addEventListener('DOMContentLoaded', () => {
         let attempts = 0;
         const MAX_ATTEMPTS = 30; // 30 × 3 s = 90 s max poll
 
-        _pollSessionTimer = setInterval(async () => {
+        // Stops ONLY this poll. A conversation can hold several completed
+        // sessions still waiting on their PDF, and _clearSessionPoll() would
+        // cancel every one of them the moment the first report landed.
+        const stop = () => {
+            clearInterval(timer);
+            _pollSessionTimers.delete(timer);
+        };
+
+        const check = async () => {
             attempts++;
             if (attempts > MAX_ATTEMPTS) {
-                _clearSessionPoll();
+                stop();
                 // .message-text, not .message-content — the latter also holds
                 // the timestamp/agent line, which writing to it wipes out.
                 const body = placeholderEl.querySelector('.message-text');
@@ -641,7 +912,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const r = await fetch(`/api/sessions/${sessionId}/report`);
                 if (r.status === 200) {
                     const data = await r.json();
-                    _clearSessionPoll();
+                    stop();
                     const body = placeholderEl.querySelector('.message-text');
                     if (body) {
                         body.textContent = readyText;
@@ -650,7 +921,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 // 202 → keep polling
             } catch (_) { /* network hiccup — try again next tick */ }
-        }, 3000);
+        };
+
+        const timer = _trackPoll(setInterval(check, 3000));
+        // Check IMMEDIATELY as well. On a history replay the report is usually
+        // long since generated and only `report_url` on the session row is
+        // stale, so waiting a full tick to say so is three seconds of "checking
+        // for the PDF report…" for a file that is already there.
+        check();
     }
 
     function _handleSession(session, agentName = null) {
@@ -658,23 +936,32 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (session.state === 'finalizing') {
             _renderFinalizingUI();
+            const stop = () => {
+                clearInterval(timer);
+                _pollSessionTimers.delete(timer);
+            };
             // Poll GET /api/sessions/{id} every 2 s until completed
-            _pollSessionTimer = setInterval(async () => {
+            const timer = _trackPoll(setInterval(async () => {
                 try {
                     const r = await fetch(`/api/sessions/${session.id}`);
                     if (!r.ok) return;
                     const updated = await r.json();
                     if (updated.state === 'completed') {
-                        _clearSessionPoll();
+                        stop();
                         _renderCompletedUI(updated, agentName);
                     } else if (updated.state === 'failed' || updated.state === 'abandoned') {
-                        _clearSessionPoll();
+                        stop();
                         const notice = document.getElementById('session-finalizing-notice');
                         if (notice) notice.remove();
-                        addMessage('Story capture could not be completed. Please try again.', 'system');
+                        addMessage(
+                            (session.agent_key || _lastSessionAgentKey) === 'capture_discussion'
+                                ? 'Capturing this discussion could not be completed. Please try again.'
+                                : 'Story capture could not be completed. Please try again.',
+                            'system',
+                        );
                     }
                 } catch (_) { }
-            }, 2000);
+            }, 2000));
         } else if (session.state === 'completed') {
             _renderCompletedUI(session, agentName);
         }
@@ -779,18 +1066,21 @@ document.addEventListener('DOMContentLoaded', () => {
     // -----------------------------------------------------------------------
     // Core send function — shared by form submit, option click, and autostart
     // -----------------------------------------------------------------------
-    let lastAgent = null;
-    // Track last sent text for the Retry button (UPSTREAM_TIMEOUT is safe to retry
-    // because the session persists in awaiting_user — §10.3 change 6).
-    let _lastSentText = '';
-    // Id of the remote_flow session in play, if any. Its PRESENCE is what makes
-    // a blind re-send unsafe -- see _renderErrorWithRetry.
-    let _lastSessionId = null;
-
-    async function sendMessage(text, optionId = null) {
+    async function sendMessage(text, optionId = null, { autostart = false } = {}) {
         if (!text || !text.trim()) return;
+        // One turn at a time. Two user messages in a row silently collapse in
+        // Mitra's DB (§1.6), so a double-submit destroys an answer -- and a
+        // first turn sent twice creates a second, orphaned Mitra session.
+        if (_busy) return;
+        _busy = true;
 
         _lastSentText = text;
+
+        // Every option group in the pane, not just the one that was clicked.
+        // A question answered by TYPING left its buttons live forever, so
+        // scrolling up and clicking one later posted that answer against
+        // whatever step the interview had since reached.
+        _disableAllOptions();
 
         userInput.value = '';
         userInput.disabled = true;
@@ -806,6 +1096,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 agent_name: currentAgentKey,   // backward-compat, remove in next release
             };
             if (optionId) body.option_id = optionId;
+            // The opening message a capability button sends on the user's
+            // behalf. Flagged so the server neither titles the conversation
+            // from it ("I want to capture a discussion" was the title of EVERY
+            // discussion in the sidebar) nor treats it as the user's own text.
+            if (autostart) body.autostart = true;
             // §10.3 change 1: attach conversation_id if we have one
             if (conversationId) body.conversation_id = conversationId;
 
@@ -825,6 +1120,10 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             if (data.status === 'success') {
+                // Clear the explicitly requested agent so the backend orchestrator 
+                // can route future turns via LLM/pins.
+                currentAgentKey = null;
+
                 if (lastAgent !== data.agent_name) {
                     addMessage(`Switched context to ${data.agent_name}`, 'context-switch');
                     lastAgent = data.agent_name;
@@ -842,8 +1141,15 @@ document.addEventListener('DOMContentLoaded', () => {
                     // Remembered so a later timeout knows a remote interview is
                     // in play and must never be recovered by re-sending.
                     _lastSessionId = data.session.id;
+                    _lastSessionAgentKey = data.session.agent_key || null;
                     _handleSession(data.session);
                 }
+                // Sidebar titles/timestamps change with every turn, and the
+                // first turn of a brand-new conversation adds a row.
+                loadRecentConversations();
+
+                // Update Context Banner with breadcrumbs
+                applyFlowBanner(data.agent_name, data.flow);
             } else {
                 // §10.3 change 6: show retry on timeout; plain error otherwise
                 if (data.error_code === 'UPSTREAM_TIMEOUT') {
@@ -859,6 +1165,7 @@ document.addEventListener('DOMContentLoaded', () => {
             typingIndicator.classList.add('hidden');
             addMessage('Network error. Please try again.', 'system');
         } finally {
+            _busy = false;
             userInput.disabled = false;
             userInput.focus();
         }
@@ -907,6 +1214,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // conversation would POST /api/sessions/{old_id}/resume and recover a
         // turn from the previous interview.
         _lastSessionId = null;
+        _lastSessionAgentKey = null;
 
         if (window.innerWidth <= 768) {
             sidebar.classList.remove('active');
@@ -915,7 +1223,13 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (newChatBtn) {
-        newChatBtn.addEventListener('click', resetConversation);
+        newChatBtn.addEventListener('click', () => {
+            // Resetting under an in-flight turn would strand its reply: the
+            // response handler would render it into the fresh conversation and
+            // persist its session id as the new one's.
+            if (_busy) return;
+            resetConversation();
+        });
     }
 
     // Stamp the initial greeting's timestamp on load
@@ -943,6 +1257,10 @@ document.addEventListener('DOMContentLoaded', () => {
         e.preventDefault();
         const message = userInput.value.trim();
         if (!message) return;
+        // Echo only if the send is actually going to happen -- otherwise a
+        // submit during an in-flight turn left an unanswered user bubble in the
+        // transcript that was never sent anywhere.
+        if (_busy) return;
         addMessage(message, 'user');
         sendMessage(message);
 

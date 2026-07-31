@@ -34,16 +34,21 @@ class _FakeMitraRest:
         self._call_order = call_order
         self.finalize_calls: List[Tuple] = []
         self.finalize_paths: List[str] = []
+        self.finalize_as_guest: List[bool] = []
         self.get_report_calls: List[Tuple] = []
         self._story_id = "9931"
         self._content = "narrative content"
         self._report_url: Optional[str] = None
         self._finalize_error: Optional[Exception] = None
 
-    def finalize(self, session_id, profile_id, flow, language, token, path="/api/end-story/v2/"):
+    def finalize(
+        self, session_id, profile_id, flow, language, token,
+        path="/api/end-story/v2/", as_guest=False,
+    ):
         self._call_order.append("finalize")
         self.finalize_calls.append((session_id, profile_id, flow, language, token))
         self.finalize_paths.append(path)
+        self.finalize_as_guest.append(as_guest)
         if self._finalize_error is not None:
             raise self._finalize_error
         return self._story_id, self._content
@@ -188,6 +193,15 @@ def test_won_claim_runs_full_sequence_in_order():
         # HTTP 500; the spec's finalize_path is what keeps this flow off v2.
         assert rest.finalize_paths == [agent.spec.remote.finalize_path]
 
+        # Same for the token-presence flag. This agent sends its token; the
+        # discussion agent does not, because Mitra picks the PDF template's
+        # user_type from token presence and a guest flow finalised WITH a token
+        # renders a blank PDF. Hardcoding either value here would break one of
+        # the two agents silently -- one with an HTTP 500, one with an empty
+        # file and no error at all.
+        assert rest.finalize_as_guest == [agent.spec.remote.finalize_as_guest]
+        assert rest.finalize_as_guest == [False], "record_stories sends its token"
+
         # Resulting session is completed with result_ref/finalized_at/ended_at.
         assert result.state == "completed"
         assert result.result_ref == "9931"
@@ -205,6 +219,48 @@ def test_won_claim_runs_full_sequence_in_order():
         assert len(audit_rows) == 1
         assert audit_rows[0][0] == "session_finalize"
         assert audit_rows[0][1] == "agent_session"
+    finally:
+        session.close()
+
+
+def test_a_guest_flow_agent_finalizes_without_the_users_token():
+    """The other half of the pin above, from the discussion agent's side.
+
+    capture_discussion sets finalize_as_guest: true because Mitra derives
+    `auth = access_token is not None` and picks the PDF template's user_type
+    from it -- so finalising with a token misses the GUEST-typed template,
+    get_html_from_template returns "" and Gotenberg produces a valid, blank
+    PDF. _finalize must forward the spec value; a hardcoded False here would
+    reintroduce the empty report with every other signal still green.
+
+    The user's token is still handed to finalize() (the client ignores it when
+    as_guest is set), so nothing about UserContext changes for guest flows.
+    """
+    session = SessionLocal()
+    try:
+        agent_id = _insert_agent_row(session, f"agent_{uuid.uuid4().hex[:8]}")
+        conv_id = _new_conversation(session)
+        sess_view = _session_ready_for_finalizing(session, conv_id, agent_id)
+        session.commit()
+
+        call_order: List[str] = []
+        rest = _FakeMitraRest(call_order)
+        orch = OrchestrationService(
+            session=session, registry=None, handler_factory=None, llm_factory=None,
+            mitra_rest=rest, mitra_sessions=_FakeMitraSessions(call_order),
+        )
+
+        agent = _remote_agent(agent_id)
+        agent.spec.remote.flow_name = "guest-discussion"
+        agent.spec.remote.finalize_as_guest = True
+
+        orch._finalize(sess_view, agent, _new_user(token="the-real-token"))
+        session.commit()
+
+        assert rest.finalize_as_guest == [True]
+        assert rest.finalize_calls[0][4] == "the-real-token", (
+            "the token is still passed; only the client decides to drop it"
+        )
     finally:
         session.close()
 

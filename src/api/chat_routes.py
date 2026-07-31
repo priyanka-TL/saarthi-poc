@@ -8,6 +8,7 @@ from src.domain.core import MemorySpec
 from src.settings import settings
 from src.api.errors import error_response, mitra_error_response
 from src.integrations.mitra.exceptions import MitraError
+from src.services.orchestration import ConcurrentTurnError, TurnLimitExceeded
 
 chat_bp = Blueprint("chat_routes", __name__)
 
@@ -31,6 +32,13 @@ def chat():
     option_id = data.get("option_id")
     # locale defaults to user.locale in the DB logic
 
+    # Parsed BEFORE the try, so a malformed id is the client error it is rather
+    # than being swallowed by the generic handler below and reported as a 500.
+    try:
+        req_conv_id = uuid.UUID(conversation_id_str) if conversation_id_str else None
+    except (ValueError, AttributeError, TypeError):
+        return error_response("conversation_id must be a UUID", "INVALID_REQUEST", 400)
+
     try:
         from src.services.orchestration import OrchestrationService, TurnInput
         container = current_app.config["CONTAINER"]
@@ -43,14 +51,14 @@ def chat():
             mitra_sessions=container.mitra_sessions,
         )
         
-        req_conv_id = uuid.UUID(conversation_id_str) if conversation_id_str else None
         ctx_in = TurnInput(
             request_id=g.request_id if hasattr(g, "request_id") else str(uuid.uuid4()),
             conversation_id=req_conv_id,
             user=g.user,
             text=user_message,
             option_id=option_id,
-            agent_key=target_agent if target_agent and target_agent != "Saarthi" else None
+            agent_key=target_agent if target_agent and target_agent != "Saarthi" else None,
+            autostart=bool(data.get("autostart")),
         )
         
         res = orch.handle_turn(ctx_in)
@@ -78,6 +86,15 @@ def chat():
             "options": [{"id": o.id, "label": o.label, "value": o.value} for o in res.turn.options],
             "session": session_payload,
         })
+    except ConcurrentTurnError:
+        # A double-submit. 409 and NOT an automatic retry: re-sending is what
+        # merges two user messages into one in Mitra and destroys an answer.
+        return error_response(
+            "A reply is already on its way. Please wait for it before sending again.",
+            "CONCURRENT_TURN", 409,
+        )
+    except TurnLimitExceeded as e:
+        return error_response(e.detail, "RATE_LIMITED", 429)
     except MitraError as e:
         return mitra_error_response(e)
     except Exception as e:
@@ -151,6 +168,13 @@ def get_conversation_messages(conversation_id):
 
     return jsonify({
         "conversation_id": str(conversation_id),
+        # The agent-journey breadcrumb, in the same shape /api/chat returns and
+        # derived from the same conversation_messages.agent_id sequence. Without
+        # it the client had nothing to rebuild the journey from on resume, so
+        # reopening a conversation from history collapsed
+        # "Capture Discussions -> Record Stories -> General Support Agent" down
+        # to whichever agent happened to speak last.
+        "flow": svc.flow_payload(conversation_id),
         "sessions": sessions_payload,
         "messages": [
             {
@@ -175,8 +199,13 @@ def reset():
     """API endpoint to clear the conversation and start a new flow."""
     data = request.get_json(silent=True) or {}
     conversation_id_str = data.get("conversation_id")
-    req_conv_id = uuid.UUID(conversation_id_str) if conversation_id_str else None
-    
+    try:
+        req_conv_id = uuid.UUID(conversation_id_str) if conversation_id_str else None
+    except (ValueError, AttributeError, TypeError):
+        # This route has no exception handler of its own, so a malformed id used
+        # to escape as a bare 500.
+        return error_response("conversation_id must be a UUID", "INVALID_REQUEST", 400)
+
     svc = ConversationService(g.db_session)
     # 1. Find the conversation being left, WITHOUT creating one. resolve() is
     #    get_or_create: on a first-ever reset it would materialise an empty
@@ -195,32 +224,16 @@ def reset():
             container.mitra_sessions.close(conv.id)
 
     # 2. Start a fresh conversation, LEAVING THE PREVIOUS ONE IN HISTORY.
-    #    First, check if there's an existing empty conversation we can reuse.
-    recent_page = svc.list_recent(g.user, limit=5)
-    reusable_conv_id = None
-    
-    for c in recent_page.conversations:
-        msgs = svc.list_messages(c.id)
-        # Reusable if there are no user messages
-        if not any(m.role == "user" for m in msgs):
-            reusable_conv_id = c.id
-            break
-
-    if reusable_conv_id:
-        new_conv_id = str(reusable_conv_id)
-        # Clean up any existing assistant messages in the reused conversation
-        # so it is a truly clean slate (prevents wrong agent greeting showing up).
-        db_session = g.db_session
-        from sqlalchemy import text
-        db_session.execute(text("DELETE FROM messages WHERE conversation_id = :cid"), {"cid": reusable_conv_id})
-        db_session.execute(text("UPDATE conversations SET message_count = 0 WHERE id = :cid"), {"cid": reusable_conv_id})
-        db_session.commit()
-    else:
-        new_conv = svc.start_new(g.user)
-        new_conv_id = str(new_conv.id)
+    #    start_new() reuses an already-empty conversation when the user has one,
+    #    so repeated resets don't accumulate dead rows. The reuse scan and the
+    #    raw DELETE that used to live here are gone: the scan filtered
+    #    list_recent, which requires message_count > 0 and therefore could never
+    #    match an empty conversation, and the DELETE named a table (`messages`)
+    #    that does not exist in this schema.
+    new_conv = svc.start_new(g.user)
 
     # 3. Return the new id.
     return jsonify({
         "status": "success",
-        "conversation_id": new_conv_id,
+        "conversation_id": str(new_conv.id),
     })

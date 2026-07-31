@@ -10,11 +10,23 @@ from src.agents.protocol import AgentTurn
 
 # A mock for the agent spec to avoid deep instantiation
 class MockSpec:
+    agent_type = "llm"
     limits = None
     memory = Mock(max_messages=5)
+
+    # FeaturesSpec, read at step 13. Missing, this test failed with an
+    # AttributeError before ever reaching its own assertion, so the "no
+    # transaction held during the handler" invariant it exists to protect was
+    # not actually being checked at all.
+    class Features:
+        record_tool_executions = False
+    features = Features()
     class Routing:
         pin_session = False
         direct_selectable = True
+        # RoutingSpec always supplies these; the stub has to as well now that
+        # Gate 1 checks for an exit command before honouring an explicit key.
+        exit_keywords = ["/exit"]
     routing = Routing()
 
 class MockAgent:
@@ -72,6 +84,8 @@ def test_no_transaction_held_during_handler():
          patch.object(service._messages, 'insert') as mock_ins, \
          patch.object(service._messages, 'recent') as mock_rec, \
          patch.object(service._sessions, 'open_for') as mock_of, \
+         patch.object(service._conversations, 'replace_placeholder_title'), \
+         patch.object(service._conversations, 'set_placeholder_title'), \
          patch.object(service._conversations, 'touch') as mock_touch:
              
         # Configure mocks to return valid data types

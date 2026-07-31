@@ -83,16 +83,31 @@ def test_finalize_path_is_v1_because_mitra_has_no_flow_row_for_this_flow():
     assert _load_spec().remote.finalize_path == "/api/end-story/"
 
 
-def test_capture_discussion_stays_on_v2():
-    """The sibling agent's flow IS registered in Mitra's Flow table, so it
-    keeps the v2 endpoint (token in header). This asserts the fix was
-    per-agent config, not a global downgrade of every flow to v1."""
+def test_the_two_agents_finalize_differently_per_agent():
+    """Finalisation settings are per-agent config, not a global switch.
+
+    Both agents land on v1 now, but for unrelated reasons -- this one because
+    Mitra has no Flow row for 'guest-mi-story' (v2 would 500), the sibling
+    because v2 has no chaupal branch and renders its PDF through
+    get_html_from_template, which returns "" and produces a blank file. Same
+    endpoint, different evidence; neither reason licenses changing the other
+    agent.
+
+    finalize_as_guest is where they still diverge, and it is the part most
+    likely to get "tidied" into one value: this agent sends its token in the v1
+    body, the discussion agent sends `access_token: null` because Mitra picks
+    the PDF template's user_type from token presence. Keep them apart.
+    """
     raw = yaml.safe_load(
         (YAML_PATH.parent / "capture_discussion.yaml").read_text()
     )
-    spec = _adapter.validate_python(raw)
-    assert spec.remote.flow_name == "guest-discussion"
-    assert spec.remote.finalize_path == "/api/end-story/v2/"
+    sibling = _adapter.validate_python(raw)
+
+    assert sibling.remote.flow_name == "guest-discussion"
+    assert sibling.remote.finalize_path == "/api/end-story/"
+    assert sibling.remote.finalize_as_guest is True
+
+    assert _load_spec().remote.finalize_as_guest is False
 
 
 def test_router_and_direct_selectable():
