@@ -132,6 +132,26 @@ document.addEventListener('DOMContentLoaded', () => {
     // typed path.
     let _busy = false;
 
+    // §10.3 change 5: session state UI — finalizing / completed / report
+    // A SET, not a single handle. _handleSession and _pollReport both used to
+    // assign to one shared variable, so whichever started last was the only one
+    // that could ever be cleared -- and a conversation with more than one
+    // session still awaiting its PDF leaked an interval per session, each
+    // writing into a DOM node that had already been discarded.
+    // Declared here to avoid Temporal Dead Zone (ReferenceError) when 
+    // loadConversationHistory is called on page reload.
+    const _pollSessionTimers = new Set();
+
+    function _trackPoll(timerId) {
+        _pollSessionTimers.add(timerId);
+        return timerId;
+    }
+
+    function _clearSessionPoll() {
+        _pollSessionTimers.forEach(clearInterval);
+        _pollSessionTimers.clear();
+    }
+
     function setContextBanner(label, subLabel, stops = null) {
         const banner = document.getElementById('active-context-banner');
         const bannerTop = document.getElementById('context-banner-top');
@@ -697,24 +717,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // -----------------------------------------------------------------------
-    // §10.3 change 5: session state UI — finalizing / completed / report
-    // -----------------------------------------------------------------------
-    // A SET, not a single handle. _handleSession and _pollReport both used to
-    // assign to one shared variable, so whichever started last was the only one
-    // that could ever be cleared -- and a conversation with more than one
-    // session still awaiting its PDF leaked an interval per session, each
-    // writing into a DOM node that had already been discarded.
-    const _pollSessionTimers = new Set();
-
-    function _trackPoll(timerId) {
-        _pollSessionTimers.add(timerId);
-        return timerId;
-    }
-
-    function _clearSessionPoll() {
-        _pollSessionTimers.forEach(clearInterval);
-        _pollSessionTimers.clear();
-    }
 
     function _renderFinalizingUI() {
         const notice = document.createElement('div');
@@ -1038,9 +1040,9 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             if (data.status === 'success') {
-                if (data.agent_key) {
-                    currentAgentKey = data.agent_key;
-                }
+                // Clear the explicitly requested agent so the backend orchestrator 
+                // can route future turns via LLM/pins.
+                currentAgentKey = null;
 
                 if (lastAgent !== data.agent_name) {
                     addMessage(`Switched context to ${data.agent_name}`, 'context-switch');
