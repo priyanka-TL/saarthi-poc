@@ -168,6 +168,13 @@ def get_conversation_messages(conversation_id):
 
     return jsonify({
         "conversation_id": str(conversation_id),
+        # The agent-journey breadcrumb, in the same shape /api/chat returns and
+        # derived from the same conversation_messages.agent_id sequence. Without
+        # it the client had nothing to rebuild the journey from on resume, so
+        # reopening a conversation from history collapsed
+        # "Capture Discussions -> Record Stories -> General Support Agent" down
+        # to whichever agent happened to speak last.
+        "flow": svc.flow_payload(conversation_id),
         "sessions": sessions_payload,
         "messages": [
             {

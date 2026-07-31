@@ -2,6 +2,16 @@ document.addEventListener('DOMContentLoaded', () => {
     const chatForm = document.getElementById('chat-form');
     const userInput = document.getElementById('user-input');
     const chatMessages = document.getElementById('chat-messages');
+
+    // Make toggle function globally available for onclick handlers in index.html
+    window.toggleWorkflowBanner = function() {
+        const banner = document.getElementById('active-context-banner');
+        if (banner) {
+            banner.classList.toggle('collapsed');
+            banner.classList.toggle('expanded');
+        }
+    };
+
     const typingIndicator = document.getElementById('typing-indicator');
     const agentList = document.getElementById('agent-list');
     const recentConversationsList = document.getElementById('recent-conversations-list');
@@ -152,34 +162,103 @@ document.addEventListener('DOMContentLoaded', () => {
         _pollSessionTimers.clear();
     }
 
-    function setContextBanner(label, subLabel, stops = null) {
+    function setContextBanner(label, subLabel, stops = null, title = null, currentIndex = 0) {
         const banner = document.getElementById('active-context-banner');
         const bannerTop = document.getElementById('context-banner-top');
+        const titleEl = document.getElementById('workflow-title-text');
+        const stopEl = document.getElementById('workflow-stop-text');
         if (!banner || !bannerTop) return;
 
         banner.classList.remove('hidden');
+        
+        if (titleEl) {
+            titleEl.textContent = title || "Workflow Progress";
+        }
+        
+        if (stopEl && stops && stops.length > 0) {
+            // Using 1-based index if currentIndex is 0-based, or just use what server sends
+            const displayIndex = (currentIndex || 0) + 1;
+            stopEl.textContent = `Stop ${displayIndex} of ${stops.length}`;
+        } else if (stopEl) {
+            stopEl.textContent = "";
+        }
+
+        // Built as DOM nodes rather than an innerHTML string: agent display
+        // names are admin-authored, but they are still data flowing from the
+        // server into markup, and the rest of this file is deliberately
+        // textContent-disciplined (see the conversation-title render below).
+        bannerTop.innerHTML = '';
 
         if (stops && stops.length > 0) {
-            let html = '';
             stops.forEach((stop, index) => {
                 const isActive = index === stops.length - 1;
-                html += `<span class="breadcrumb-item ${isActive ? 'active' : ''}">${stop}</span>`;
+
+                const item = document.createElement('span');
+                item.className = `breadcrumb-item ${isActive ? 'active' : ''}`;
+
+                // The dot indicator is an empty element drawn entirely in CSS
+                // (filled for the current stop, hollow for the ones behind it),
+                // so the label keeps its own node and stays textContent-only.
+                const dot = document.createElement('span');
+                dot.className = 'breadcrumb-dot';
+                item.appendChild(dot);
+
+                const labelEl = document.createElement('span');
+                labelEl.className = 'breadcrumb-label';
+                labelEl.textContent = stop;
+                item.appendChild(labelEl);
+
+                bannerTop.appendChild(item);
+
                 if (!isActive) {
-                    html += `<span class="breadcrumb-separator">
-                               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                 <polyline points="9 18 15 12 9 6"></polyline>
-                               </svg>
-                             </span>`;
+                    const sep = document.createElement('span');
+                    sep.className = 'breadcrumb-separator';
+                    sep.innerHTML = `
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                          <polyline points="9 18 15 12 9 6"></polyline>
+                        </svg>`;
+                    bannerTop.appendChild(sep);
                 }
             });
-            bannerTop.innerHTML = html;
         } else {
             const displayLabel = label === 'Home' ? label : label + ' Context';
             const displaySubLabel = subLabel || label;
-            bannerTop.innerHTML = `
-                <span class="context-pill primary">Context: <span id="context-name">${displayLabel}</span></span>
-                <span class="context-pill secondary">Sub-context: <span id="sub-context-name">${displaySubLabel}</span></span>
-            `;
+
+            const primary = document.createElement('span');
+            primary.className = 'context-pill primary';
+            primary.append('Context: ');
+            const primaryValue = document.createElement('span');
+            primaryValue.id = 'context-name';
+            primaryValue.textContent = displayLabel;
+            primary.appendChild(primaryValue);
+
+            const secondary = document.createElement('span');
+            secondary.className = 'context-pill secondary';
+            secondary.append('Sub-context: ');
+            const secondaryValue = document.createElement('span');
+            secondaryValue.id = 'sub-context-name';
+            secondaryValue.textContent = displaySubLabel;
+            secondary.appendChild(secondaryValue);
+
+            bannerTop.append(primary, secondary);
+        }
+    }
+
+    // The ONE place a server `flow` payload becomes the header, so the
+    // live-turn path and the resume path cannot drift apart again -- they did,
+    // and that is exactly why reopening a conversation from history lost its
+    // breadcrumb: only sendMessage() ever passed `stops`.
+    //
+    // Falls back to the flat Context/Sub-context pills only when the server
+    // sent no journey at all, i.e. a conversation with no assistant messages.
+    function applyFlowBanner(agentName, flow, fallbackSubLabel) {
+        const stops = flow && Array.isArray(flow.stops) ? flow.stops : null;
+        if (stops && stops.length > 0) {
+            setContextBanner(agentName, agentName, stops, flow.title, flow.current_index);
+        } else if (agentName) {
+            setContextBanner(agentName, fallbackSubLabel || agentName);
+        } else {
+            setContextBanner('Home', '–');
         }
     }
 
@@ -660,11 +739,12 @@ document.addEventListener('DOMContentLoaded', () => {
             // Discussions" pill.
             lastAgent = lastAgentName;
 
-            if (lastAgentName) {
-                setContextBanner(lastAgentName, 'Resumed conversation');
-            } else {
-                setContextBanner('Home', '–');
-            }
+            // Restore the FULL agent journey, not just the speaker the
+            // transcript ended on. The server derives `flow` from the same
+            // message sequence it uses on a live turn, so a reopened
+            // conversation shows the identical breadcrumb it had when it was
+            // last active -- and so does a page reload, which lands here too.
+            applyFlowBanner(lastAgentName, data.flow, 'Resumed conversation');
 
             // Replay the session state the transcript cannot carry. The
             // completion notice is generated, not stored, so without this a
@@ -1069,8 +1149,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 loadRecentConversations();
 
                 // Update Context Banner with breadcrumbs
-                const stops = data.flow ? data.flow.stops : null;
-                setContextBanner(data.agent_name, data.agent_name, stops);
+                applyFlowBanner(data.agent_name, data.flow);
             } else {
                 // §10.3 change 6: show retry on timeout; plain error otherwise
                 if (data.error_code === 'UPSTREAM_TIMEOUT') {

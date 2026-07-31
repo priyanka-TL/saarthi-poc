@@ -484,3 +484,106 @@ def test_messages_carry_their_agent_session_id(client, as_user):
 
     assert msgs[0]["agent_session_id"] is None, "user messages belong to no session"
     assert msgs[1]["agent_session_id"] == str(sess_id)
+
+
+# ---------------------------------------------------------------------------
+# The reported bug: reopening a conversation from history lost the agent
+# breadcrumb.
+#
+# A conversation that had walked Capture Discussion -> Record Story -> General
+# Support came back showing only "Context: General Support Agent / Sub-context:
+# Resumed conversation" -- the whole journey collapsed to whoever spoke last.
+#
+# The journey was never missing from the database: conversation_messages.agent_id
+# holds it, and ConversationService.flow_payload() already reconstructs it on
+# every /api/chat turn. It simply was not on THIS endpoint, so the client had
+# nothing to restore from. These tests pin `flow` onto the resume contract.
+# ---------------------------------------------------------------------------
+
+def _flow(client, conversation_id):
+    return client.get(f"/api/conversations/{conversation_id}/messages").get_json()["flow"]
+
+
+def test_reopening_a_multi_agent_conversation_returns_the_full_journey(
+    client, script, second_llm_agent
+):
+    """THE regression test. Three stops, and the last agent repeats an earlier
+    one -- the exact shape of the reported bug (Capture Discussion -> Record
+    Story -> General Support), plus proof that dedup is against the previous
+    stop only, so an agent may legitimately appear twice."""
+    from tests.characterisation.conftest import DEFAULT_AGENT, chat
+
+    second_name, _key = second_llm_agent
+
+    script.queue("a")
+    _, first = chat(client, "start here", DEFAULT_AGENT)
+    conv_id = first["conversation_id"]
+
+    script.queue("b")
+    chat(client, "switch", second_name, conversation_id=conv_id)
+
+    script.queue("c")
+    _, live = chat(client, "and back", DEFAULT_AGENT, conversation_id=conv_id)
+
+    resumed = _flow(client, conv_id)
+
+    assert resumed["stops"] == [DEFAULT_AGENT, second_name, DEFAULT_AGENT]
+    assert resumed["stops"] == live["flow"]["stops"], (
+        "resuming must show the identical breadcrumb the live turn showed -- "
+        "this is what regressed when only /api/chat returned `flow`"
+    )
+    assert resumed["title"] == live["flow"]["title"]
+
+
+def test_history_flow_current_index_points_at_the_last_stop(
+    client, script, second_llm_agent
+):
+    """The client highlights stops[current_index]. Off-by-one here would mark
+    the wrong agent as the one in play on every resumed conversation."""
+    from tests.characterisation.conftest import DEFAULT_AGENT, chat
+
+    second_name, _key = second_llm_agent
+
+    script.queue("a")
+    _, first = chat(client, "one", DEFAULT_AGENT)
+    conv_id = first["conversation_id"]
+    script.queue("b")
+    chat(client, "two", second_name, conversation_id=conv_id)
+
+    flow = _flow(client, conv_id)
+
+    assert flow["stops"] == [DEFAULT_AGENT, second_name]
+    assert flow["current_index"] == len(flow["stops"]) - 1
+
+
+def test_consecutive_turns_with_one_agent_are_a_single_stop(client, script):
+    """A long single-agent conversation must not produce a breadcrumb with one
+    stop per turn."""
+    from tests.characterisation.conftest import DEFAULT_AGENT, chat
+
+    script.queue("a")
+    _, first = chat(client, "one", DEFAULT_AGENT)
+    conv_id = first["conversation_id"]
+    for text_ in ("two", "three"):
+        script.queue("reply")
+        chat(client, text_, DEFAULT_AGENT, conversation_id=conv_id)
+
+    flow = _flow(client, conv_id)
+
+    assert flow["stops"] == [DEFAULT_AGENT]
+    assert flow["current_index"] == 0
+
+
+def test_flow_is_empty_when_no_agent_has_spoken_yet(client, as_user):
+    """User messages carry no agent_id, so a conversation nobody has been
+    answered in has no journey at all. The client falls back to Home on this,
+    which is why it must be an empty list and -1 rather than absent or null."""
+    user = _new_user()
+    as_user(user)
+    conv_id = _seed_conversation(user, "unanswered", datetime.now(timezone.utc))
+    _seed_message(conv_id, 1, "user", "hello?")
+
+    flow = _flow(client, conv_id)
+
+    assert flow["stops"] == []
+    assert flow["current_index"] == -1
