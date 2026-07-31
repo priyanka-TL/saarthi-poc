@@ -434,45 +434,7 @@ document.addEventListener('DOMContentLoaded', () => {
             recentConversationsList.innerHTML = '';
 
             (data.conversations || []).forEach(conv => {
-                const li = document.createElement('li');
-                li.className = 'agent-item';
-                li.dataset.id = conv.id;
-
-                const titleRow = document.createElement('div');
-                titleRow.className = 'agent-item-title';
-                titleRow.innerHTML = AGENT_ICON_SVG;
-                const nameSpan = document.createElement('span');
-                nameSpan.className = 'agent-name';
-                // conv.title is user-supplied text (the conversation's first
-                // message, truncated) -- textContent, never innerHTML, unlike
-                // loadAgents()'s admin-authored agent.name/description.
-                nameSpan.textContent = conv.title;
-                titleRow.appendChild(nameSpan);
-
-                const descDiv = document.createElement('div');
-                descDiv.className = 'agent-desc';
-                descDiv.textContent = conv.last_message_at
-                    ? `Last active ${formatRelativeTime(new Date(conv.last_message_at))}`
-                    : 'No messages yet';
-
-                li.appendChild(titleRow);
-                li.appendChild(descDiv);
-
-                li.addEventListener('click', () => {
-                    // Switching conversations mid-turn would leave the in-flight
-                    // reply to render into the wrong transcript.
-                    if (_busy) return;
-                    clearActiveItems();
-                    li.classList.add('active');
-                    loadConversationHistory(conv.id);
-
-                    if (window.innerWidth <= 768) {
-                        sidebar.classList.remove('active');
-                        sidebarOverlay.classList.remove('active');
-                    }
-                });
-
-                recentConversationsList.appendChild(li);
+                recentConversationsList.appendChild(_buildConversationRow(conv));
             });
 
             // The list is rebuilt from scratch on every load, so the highlight
@@ -483,6 +445,111 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (error) {
             console.error('Failed to load recent conversations:', error);
         }
+    }
+
+    // Builds one sidebar row. Shared by the full list render above and by
+    // _upsertConversationRow below, so a locally-added row is indistinguishable
+    // from a fetched one (same markup, same escaping, same click handler).
+    function _buildConversationRow(conv) {
+        const li = document.createElement('li');
+        li.className = 'agent-item';
+        li.dataset.id = conv.id;
+        // Kept on the element so _refreshRelativeTimes can recompute the
+        // "Last active ..." text later without refetching the list.
+        li.dataset.lastMessageAt = conv.last_message_at || '';
+
+        const titleRow = document.createElement('div');
+        titleRow.className = 'agent-item-title';
+        titleRow.innerHTML = AGENT_ICON_SVG;
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'agent-name';
+        // conv.title is user-supplied text (the conversation's first
+        // message, truncated) -- textContent, never innerHTML, unlike
+        // loadAgents()'s admin-authored agent.name/description.
+        nameSpan.textContent = conv.title;
+        titleRow.appendChild(nameSpan);
+
+        const descDiv = document.createElement('div');
+        descDiv.className = 'agent-desc';
+
+        li.appendChild(titleRow);
+        li.appendChild(descDiv);
+        _stampRelativeTime(li);
+
+        li.addEventListener('click', () => {
+            // Switching conversations mid-turn would leave the in-flight
+            // reply to render into the wrong transcript.
+            if (_busy) return;
+            clearActiveItems();
+            li.classList.add('active');
+            loadConversationHistory(conv.id);
+
+            if (window.innerWidth <= 768) {
+                sidebar.classList.remove('active');
+                sidebarOverlay.classList.remove('active');
+            }
+        });
+
+        return li;
+    }
+
+    // Writes one row's "Last active ..." line from its stored timestamp.
+    function _stampRelativeTime(li) {
+        const descDiv = li.querySelector('.agent-desc');
+        if (!descDiv) return;
+        const ts = li.dataset.lastMessageAt;
+        descDiv.textContent = ts
+            ? `Last active ${formatRelativeTime(new Date(ts))}`
+            : 'No messages yet';
+    }
+
+    // Re-renders every row's relative time. The old per-turn refetch of
+    // /api/conversations kept these from going stale as a side effect; doing it
+    // from the stored timestamps gets the same result with no network call.
+    function _refreshRelativeTimes() {
+        if (!recentConversationsList) return;
+        recentConversationsList.querySelectorAll('.agent-item').forEach(_stampRelativeTime);
+    }
+
+    // Updates the sidebar for a conversation that just took a turn, WITHOUT
+    // refetching the list. Everything a row needs is already in the /api/chat
+    // response: the id, the title (flow.title is re-SELECTed after the turn
+    // commits, so it is fresh -- including the autostart placeholder title being
+    // promoted to the user's own words on turn 2), and the timestamp, which is
+    // simply now. Refetching /api/conversations after every single message was a
+    // full DB round trip per turn to learn what the client already knew.
+    function _upsertConversationRow({ id, title, lastMessageAt }) {
+        if (!recentConversationsList || !id) return;
+
+        let li = recentConversationsList.querySelector(`.agent-item[data-id="${id}"]`);
+        if (li) {
+            li.dataset.lastMessageAt = lastMessageAt || '';
+            const nameSpan = li.querySelector('.agent-name');
+            // An untitled turn must not blank a title the row already has.
+            if (nameSpan && title) nameSpan.textContent = title;
+        } else {
+            // First message of a brand-new conversation -- no row exists yet.
+            // 'New conversation' matches the server's own fallback in
+            // chat_routes.list_conversations.
+            li = _buildConversationRow({
+                id,
+                title: title || 'New conversation',
+                last_message_at: lastMessageAt || null,
+            });
+        }
+
+        // This conversation is now the most recently active, which is exactly
+        // the order the server returns (last_message_at DESC).
+        recentConversationsList.prepend(li);
+
+        // Respect the server's own cap so the list can't grow past what a
+        // reload would show.
+        while (recentConversationsList.children.length > 20) {
+            recentConversationsList.lastElementChild.remove();
+        }
+
+        _refreshRelativeTimes();
+        _highlightActiveConversation();
     }
 
     // Marks the sidebar row for `conversationId`, if it is currently listed.
@@ -1145,8 +1212,14 @@ document.addEventListener('DOMContentLoaded', () => {
                     _handleSession(data.session);
                 }
                 // Sidebar titles/timestamps change with every turn, and the
-                // first turn of a brand-new conversation adds a row.
-                loadRecentConversations();
+                // first turn of a brand-new conversation adds a row -- but the
+                // response already carries everything that row needs, so patch
+                // it locally instead of refetching the whole list every message.
+                _upsertConversationRow({
+                    id: data.conversation_id,
+                    title: data.flow && data.flow.title,
+                    lastMessageAt: new Date().toISOString(),
+                });
 
                 // Update Context Banner with breadcrumbs
                 applyFlowBanner(data.agent_name, data.flow);
@@ -1199,9 +1272,11 @@ document.addEventListener('DOMContentLoaded', () => {
             sessionStorage.removeItem('saarthi_cid');
         }
 
-        // The chat just moved to a new conversation, so the previous one is now
-        // history -- refresh the sidebar instead of waiting for a page reload.
-        loadRecentConversations();
+        // Only the highlight changes here. The conversation reset just created is
+        // empty, and list_recent filters on message_count > 0, so it cannot appear
+        // in the sidebar until its first turn -- which _upsertConversationRow then
+        // adds locally. Refetching the whole list at this point told us nothing new.
+        _highlightActiveConversation();
 
         chatMessages.innerHTML = '';
         addMessage('Namaste. How can I help you today?', 'system');
